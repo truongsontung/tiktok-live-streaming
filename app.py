@@ -1013,9 +1013,16 @@ def add_overlay_comment(username: str, comment: str, is_ai_response: bool = Fals
     overlay_renderer.add_comment(username, comment, is_ai_response)
     return {"success": True, "message": "Comment added to overlay"}
 
+@app.post("/api/overlay/welcome")
+def add_overlay_welcome(username: str = ""):
+    """Add a welcome message for a new viewer."""
+    overlay_renderer.add_welcome_message(username or "New viewer")
+    return {"success": True, "message": "Welcome message added to overlay"}
+
 @app.post("/api/overlay/config")
 def configure_overlays(enabled: bool, comment_scroll: bool = True, ai_response: bool = True, 
-                       viewer_count: bool = True, stats_panel: bool = True, clock: bool = True):
+                       viewer_count: bool = True, stats_panel: bool = True, clock: bool = True,
+                       welcome: bool = True):
     """Configure which overlays are enabled."""
     config = {
         "clock": clock,
@@ -1023,6 +1030,7 @@ def configure_overlays(enabled: bool, comment_scroll: bool = True, ai_response: 
         "ai_response": ai_response,
         "viewer_count": viewer_count,
         "stats_panel": stats_panel,
+        "welcome": welcome,
     }
     overlay_renderer.configure_overlays(config)
     return {"success": True, "message": "Overlay configuration updated"}

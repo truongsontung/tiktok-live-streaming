@@ -60,6 +60,7 @@ class TikTokLiveClientManager:
         self.on_gift_callbacks: List[Callable] = []
         self.on_connect_callbacks: List[Callable] = []
         self.on_disconnect_callbacks: List[Callable] = []
+        self.on_viewer_join_callbacks: List[Callable] = []
 
         # Stats
         self.total_comments: int = 0
@@ -192,12 +193,21 @@ class TikTokLiveClientManager:
 
         @self.client.on(RoomUserSeqEvent)
         async def on_viewer_count(cmd):
+            join_callbacks = []
             with self._lock:
                 vc = getattr(cmd, 'viewer_count', None) or getattr(cmd, 'user_count', None)
                 if vc is not None:
+                    prev = self.viewer_count
                     self.viewer_count = vc
                     if self.peak_viewers < vc:
                         self.peak_viewers = vc
+                    if vc > prev:
+                        join_callbacks = list(self.on_viewer_join_callbacks)
+            for cb in join_callbacks:
+                try:
+                    cb(self.viewer_count)
+                except Exception as e:
+                    logger.error(f"Error in viewer join callback: {e}")
 
     def connect_async(self):
         """Start the async event loop in a background thread."""

@@ -58,8 +58,13 @@ class StreamEngine:
         self._comment_stop_event = threading.Event()
         self._key_refresh_thread = None
 
-        # Configure callback from live client to AI engine
+        # Configure callbacks from live client
         live_client.on_comment_callbacks.append(self._handle_live_comment)
+        live_client.on_viewer_join_callbacks.append(self._handle_viewer_join)
+    
+    def _handle_viewer_join(self, viewer_count: int):
+        """Callback when a new viewer joins the live room."""
+        overlay_renderer.add_welcome_message(f"Viewer #{viewer_count}")
 
     def _handle_live_comment(self, comment_data: dict, comment_count: int):
         """Callback when a new comment arrives from TikTok live."""
@@ -334,8 +339,24 @@ class StreamEngine:
             ai_engine.configure(ai_config["api_key"], model, persona, base_url, custom_prompt)
             ai_engine.set_enabled(True)
 
-        # Configure overlay renderer (respect config, default to OFF)
-        overlay_renderer.set_enabled(config.get("overlay_enabled", False))
+        # Configure overlay renderer — enable overlays when streaming (default ON)
+        overlay_enabled = config.get("overlay_enabled", True)
+        overlay_renderer.set_enabled(overlay_enabled)
+        
+        # Configure overlay sub-types
+        overlay_config = config.get("overlay_config")
+        if overlay_config and isinstance(overlay_config, dict):
+            overlay_renderer.configure_overlays(overlay_config)
+        elif overlay_enabled:
+            # Default: enable comment_scroll + ai_response + welcome
+            overlay_renderer.configure_overlays({
+                "comment_scroll": True,
+                "ai_response": True,
+                "welcome": True,
+                "clock": True,
+                "stats_panel": True,
+                "viewer_count": True,
+            })
 
         # Configure live client if tiktok username is provided
         tiktok_username = config.get("tiktok_username", "")

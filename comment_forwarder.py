@@ -114,6 +114,20 @@ def _extract_cart_link(comment: str, ai_response: str) -> str:
     return None
 
 
+def _send_overlay_comment(username: str, comment: str, is_ai: bool = False):
+    """Forward a comment/AI response to the server's overlay renderer via HTTP."""
+    try:
+        code, data = _fetch_json(
+            f"{SERVER_URL}/api/overlay/comment",
+            data={"username": username, "comment": comment, "is_ai_response": is_ai},
+        )
+        if code == 200:
+            logger.info(f"Overlay updated: {username}: {comment[:60]}")
+        else:
+            logger.warning(f"Overlay post failed (code {code}): {str(data)[:120]}")
+    except Exception as e:
+        logger.warning(f"Overlay post error: {e}")
+
 def fetch_active_media():
     """Lay video dang live + product_tag/cart_link tu GET /api/live/active-media."""
     code, info = _fetch_json(f"{SERVER_URL}/api/live/active-media")
@@ -151,6 +165,139 @@ def _fetch_tt_target_idc_from_tiktok(session_id: str) -> str:
     except Exception as e:
         logger.warning(f"tt-target-idc fallback extract failed: {e}")
     return ""
+
+
+def _send_chat_via_playwright(session_id: str, unique_id: str, message: str, room_id: str = "") -> bool:
+    """
+    Fallback: send a chat message to TikTok LIVE via headless browser.
+    Used when the sign-server API key is not configured (401 on send_room_chat).
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        logger.error("Playwright not installed for chat fallback")
+        return False
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, args=[
+                "--no-sandbox", "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationDetected",
+            ])
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            )
+
+            # Set TikTok session cookies
+            cookie_str = f"sessionid={session_id}; sessionid_ss={session_id}; sid_tt={session_id}; sid_api={session_id}"
+            context.add_cookies([
+                {"name": "sessionid", "value": session_id, "domain": ".tiktok.com", "path": "/", "secure": True, "httpOnly": False, "sameSite": "None"},
+                {"name": "sessionid_ss", "value": session_id, "domain": ".tiktok.com", "path": "/", "secure": True, "httpOnly": False, "sameSite": "None"},
+                {"name": "sid_tt", "value": session_id, "domain": ".tiktok.com", "path": "/", "secure": True, "httpOnly": False, "sameSite": "None"},
+                {"name": "sid_api", "value": session_id, "domain": ".tiktok.com", "path": "/", "secure": True, "httpOnly": False, "sameSite": "None"},
+            ])
+
+            page = context.new_page()
+
+            # Navigate to live room
+            live_url = f"https://www.tiktok.com/@{unique_id}/live"
+            page.goto(live_url, wait_until="domcontentloaded", timeout=45000)
+            import time; time.sleep(5)
+
+            logger.info(f"TikTok room_id: {room_id}")
+
+            # UI interaction: find comment input + send button via JS
+            try:
+                result = page.evaluate("""(msg) => {
+                    function findInput() {
+                        // Search broadly for comment input elements
+                        const allInputs = document.querySelectorAll('textarea, input[type="text"]');
+                        for (const el of allInputs) {
+                            const ph = (el.placeholder || el.getAttribute('placeholder') || '').toLowerCase();
+                            const te2e = el.getAttribute('data-e2e') || '';
+                            const id = el.id || '';
+                            if (ph.includes('comment') || ph.includes('bình') || ph.includes('chat') ||
+                                te2e.includes('comment') || te2e.includes('chat') ||
+                                id.includes('comment') || id.includes('chat')) {
+                                return el;
+                            }
+                        }
+                        // Fallback: any focused textarea on the live page
+                        const liveContainer = document.querySelector('[data-e2e*="live"]') || document.body;
+                        const ta = liveContainer.querySelector('textarea');
+                        if (ta) return ta;
+                        return null;
+                    }
+
+                    function findSendBtn() {
+                        // Search for send button
+                        const btns = document.querySelectorAll('button');
+                        for (const btn of btns) {
+                            const txt = (btn.textContent || '').toLowerCase().trim();
+                            const te2e = btn.getAttribute('data-e2e') || '';
+                            if (txt.includes('gửi') || txt.includes('send') || txt.includes('comment') ||
+                                te2e.includes('send') || te2e.includes('comment')) {
+                                return btn;
+                            }
+                        }
+                        // Fallback: button near the input
+                        const input = findInput();
+                        if (input) {
+                            const parent = input.closest('div');
+                            if (parent) {
+                                const btn = parent.querySelector('button');
+                                if (btn) return btn;
+                            }
+                        }
+                        return null;
+                    }
+
+                    const inputEl = findInput();
+                    if (!inputEl) return {error: 'input_not_found'};
+
+                    // Clear and type
+                    inputEl.value = '';
+                    inputEl.focus();
+                    inputEl.value = msg;
+                    inputEl.dispatchEvent(new Event('input', {bubbles: true}));
+                    inputEl.dispatchEvent(new Event('change', {bubbles: true}));
+                    inputEl.dispatchEvent(new Event('blur'), {bubbles: true});
+
+                    // Try Enter key
+                    const keydown = new KeyboardEvent('keydown', {
+                        key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
+                        bubbles: true, cancelable: true
+                    });
+                    inputEl.dispatchEvent(keydown);
+
+                    const btn = findSendBtn();
+                    if (btn) {
+                        btn.click();
+                        return {success: true, method: 'button_click'};
+                    }
+                    return {success: true, method: 'enter_key'};
+                }""", message)
+
+                if isinstance(result, dict) and result.get("success"):
+                    logger.info(f"Chat sent via UI: {result}")
+                    time.sleep(3)
+                    return True
+                elif isinstance(result, dict) and result.get("error"):
+                    logger.warning(f"UI interaction: {result['error']}")
+                else:
+                    logger.warning(f"UI interaction result: {result}")
+            except Exception as ui_e:
+                logger.warning(f"UI interaction failed: {ui_e}")
+
+            return False
+
+    except Exception as e:
+        logger.error(f"Playwright chat fallback failed: {e}")
+        try:
+            browser.close()
+        except:
+            pass
+        return False
 
 
 def forward_comment(username: str, comment: str, api_secret: str, product_tag: str = None) -> dict:
@@ -292,17 +439,25 @@ def start_listener():
                 logger.info("Reply on cooldown, skipping")
                 return
             last_reply = now
-            # Không bao gio dan URL chu (vi pham Community Guidelines).
-            # Relay: nhan duoc ai_response tu server; comment_forwarder chi la CTA tu nhien,
-            # voi huong dan nguoi dung an nut gio hang mau vang native tren video.
-            cart_link = ""  # luon trong so voi tranh vi pham
-            reply_text = ai_response
-            reply_text = ai_response if not cart_link else f"{ai_response}\nMua ngay: {cart_link}"
+            # Render AI response as overlay text on the video stream instead of
+            # sending to TikTok comment API (sign server needs paid plan).
+            overlay_text = ai_response
+            _send_overlay_comment("🤖 AI Assistant", overlay_text, is_ai=True)
+            # Best-effort: also try TikTok send_room_chat via SDK (if sign API key is set)
+            _replied = False
             try:
-                await asyncio.wait_for(client.send_room_chat(reply_text), timeout=5)
-                logger.warning(f"Replied (cart): {reply_text}")
+                resp = await asyncio.wait_for(client.send_room_chat(overlay_text), timeout=5)
+                if isinstance(resp, dict) and resp.get("code") == 0:
+                    _replied = True
+                elif isinstance(resp, dict) and resp.get("code") == 401:
+                    logger.info("send_room_chat 401 (no sign API key) — overlay fallback active")
+                else:
+                    logger.warning(f"send_room_chat response: {str(resp)[:200]}")
             except Exception as e:
-                logger.error(f"Reply failed: {e}")
+                logger.warning(f"send_room_chat failed (expected without API key): {e}")
+
+            if not _replied:
+                logger.warning(f"AI response rendered on overlay (not sent to TikTok): {overlay_text}")
 
     try:
         client.run()

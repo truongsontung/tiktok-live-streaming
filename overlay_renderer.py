@@ -35,37 +35,36 @@ class OverlayRenderer:
             "ai_response": False,
             "viewer_count": False,
             "stats_panel": False,
+            "welcome": False,
         }
         self.max_comment_lines: int = 6
-        self.comment_scroll_speed: float = 30.0  # pixels per second
+        self.comment_scroll_speed: float = 30.0
+        self._welcome_ttl: float = 8.0
+        self._ai_response_ttl: float = 10.0
         
-        # Active overlay text
         self.current_overlay_text: str = ""
         self.clock_text: str = ""
-        
-        # Comment display data
         self.comment_queue: deque = deque(maxlen=20)
         self.active_comments: deque = deque(maxlen=10)
+        self.active_welcome: deque = deque(maxlen=5)
         
-        # File paths for drawtext
         self.text_files: Dict[str, str] = {
             "clock": os.path.join(OVERLAY_DIR, "clock.txt"),
             "comment": os.path.join(OVERLAY_DIR, "comment.txt"),
             "ai_response": os.path.join(OVERLAY_DIR, "ai_response.txt"),
             "stats": os.path.join(OVERLAY_DIR, "stats.txt"),
             "title": os.path.join(OVERLAY_DIR, "title.txt"),
+            "welcome": os.path.join(OVERLAY_DIR, "welcome.txt"),
         }
         
         self._lock = threading.Lock()
         self._last_update: float = 0
-        self._update_interval: float = 0.5  # Update overlays every 0.5s
+        self._update_interval: float = 0.5
         
-        # Stats tracking
         self.stream_start_time: Optional[float] = None
         self.total_comments_displayed: int = 0
         self.total_responses_displayed: int = 0
 
-        # Initialize overlay text files with default content
         self._init_overlay_files()
 
     def _init_overlay_files(self):
@@ -76,6 +75,7 @@ class OverlayRenderer:
             "ai_response": "",
             "stats": "Viewers: 0 | Peak: 0",
             "title": "TikTok Live Stream",
+            "welcome": "",
         }
         for name, content in defaults.items():
             filepath = self.text_files.get(name)
@@ -108,6 +108,30 @@ class OverlayRenderer:
     def set_main_text(self, text: str):
         """Alias for set_overlay_text."""
         self.set_overlay_text(text)
+
+    def set_enabled_overlays(self, enabled: bool):
+        """Enable or disable all overlay types at once."""
+        with self._lock:
+            for k in self.enabled_overlays:
+                self.enabled_overlays[k] = enabled
+
+    def add_welcome_message(self, username: str):
+        """Add a welcome message for a new viewer."""
+        if not username:
+            return
+        ts = datetime.now().strftime("%H:%M:%S")
+        entry = {
+            "timestamp": ts,
+            "username": username[:20],
+            "is_ai_response": False,
+            "age": 0,
+            "ttl": self._welcome_ttl,
+            "start_time": time.time(),
+        }
+        with self._lock:
+            self.active_welcome.append(entry)
+            self.total_comments_displayed += 1
+        self._update_files()
 
     def add_comment(self, username: str, comment: str, is_ai_response: bool = False):
         """Add a comment or AI response to the display queue."""
@@ -192,13 +216,31 @@ class OverlayRenderer:
         return "\n".join(lines)
 
     def _build_ai_response_display(self) -> str:
-        """Build AI response display text."""
+        """Build AI response display text with colorful emoji header."""
         with self._lock:
             for comment in reversed(list(self.active_comments)):
                 if comment.get("is_ai_response"):
                     text = comment["comment"][:80]
-                    return text
+                    return f"🤖 AI: {text}"
         return ""
+
+    def _build_welcome_display(self) -> str:
+        """Build welcome message display text."""
+        if not self.active_welcome:
+            return ""
+        current_time = time.time()
+        lines = []
+        with self._lock:
+            expired = []
+            for i, msg in enumerate(self.active_welcome):
+                msg["age"] = current_time - msg.get("start_time", current_time)
+                if msg["age"] > msg["ttl"]:
+                    expired.append(i)
+            for i in reversed(expired):
+                del self.active_welcome[i]
+            for msg in list(self.active_welcome)[-5:]:
+                lines.append(f"🎉 Chào mừng {'👤' + msg['username'] + '👤'}!")
+        return "\n".join(lines)
 
     def _build_stats_display(self, stats: Optional[Dict[str, Any]] = None) -> str:
         """Build stats panel text."""
@@ -255,6 +297,11 @@ class OverlayRenderer:
             ai_text = self._build_ai_response_display()
             self._write_text_file("ai_response", ai_text)
         
+        # Update welcome messages
+        if self.enabled_overlays.get("welcome", False):
+            welcome_text = self._build_welcome_display()
+            self._write_text_file("welcome", welcome_text)
+        
         # Update title
         if self.current_overlay_text:
             self._write_text_file("title", self.current_overlay_text)
@@ -292,23 +339,27 @@ class OverlayRenderer:
         
         # Clock (dynamic from file)
         if self.enabled and config.get("show_clock", False):
-            args.append(f"drawtext=textfile={self.text_files['clock']}:x=(w-tw)/2:y=w/4:fontsize=48:fontcolor=yellow:box=1:boxcolor=black@0.6:boxborderw=10:reload=1:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
+            args.append(f"drawtext=textfile={self.text_files['clock']}:x=(w-tw)/2:y=w/4:fontsize=36:fontcolor=yellow@0.9:box=1:boxcolor=black@0.5:boxborderw=8:reload=1:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
         
-        # Dynamic comment overlay
+        # Dynamic comment overlay (scroll from bottom)
         if self.enabled and self.enabled_overlays.get("comment_scroll", False):
-            args.append(f"drawtext=textfile={self.text_files['comment']}:x=20:y=h-th-120:fontsize=24:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=5:reload=1:line_spacing=10:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+            args.append(f"drawtext=textfile={self.text_files['comment']}:x=20:y=h-th-120:fontsize=22:fontcolor=white@0.9:box=1:boxcolor=black@0.6:boxborderw=6:reload=1:line_spacing=8:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
         
-        # AI response overlay
+        # AI response overlay (large centered, gradient effect via shadow)
         if self.enabled and self.enabled_overlays.get("ai_response", False):
-            args.append(f"drawtext=textfile={self.text_files['ai_response']}:x=(w-tw)/2:y=h/2:fontsize=28:fontcolor=cyan:box=1:boxcolor=black@0.6:boxborderw=8:reload=1:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
+            args.append(f"drawtext=textfile={self.text_files['ai_response']}:x=(w-tw)/2:y=h/2-60:fontsize=32:fontcolor=cyan@0.95:box=1:boxcolor=black@0.6:boxborderw=10:reload=1:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
+        
+        # Welcome messages (center top, bouncing/fading)
+        if self.enabled and self.enabled_overlays.get("welcome", False):
+            args.append(f"drawtext=textfile={self.text_files['welcome']}:x=(w-tw)/2:y=130:fontsize=28:fontcolor=white@0.9:box=1:boxcolor=red@0.7:boxborderw=8:line_spacing=6:reload=1:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
         
         # Stats panel
         if self.enabled and self.enabled_overlays.get("stats_panel", False):
-            args.append(f"drawtext=textfile={self.text_files['stats']}:x=20:y=80:fontsize=20:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=5:reload=1:line_spacing=8:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+            args.append(f"drawtext=textfile={self.text_files['stats']}:x=20:y=80:fontsize=18:fontcolor=white@0.85:box=1:boxcolor=black@0.5:boxborderw=6:reload=1:line_spacing=6:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
         
         # Title overlay
         if self.enabled and self.current_overlay_text:
-            args.append(f"drawtext=textfile={self.text_files['title']}:x=(w-tw)/2:y=10:fontsize=28:fontcolor=white:box=1:boxcolor=royalblue@0.6:boxborderw=10:reload=1:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
+            args.append(f"drawtext=textfile={self.text_files['title']}:x=(w-tw)/2:y=15:fontsize=28:fontcolor=white@0.95:box=1:boxcolor=royalblue@0.6:boxborderw=10:reload=1:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
         
         return args
 
@@ -319,6 +370,7 @@ class OverlayRenderer:
                 "enabled": self.enabled,
                 "enabled_overlays": self.enabled_overlays,
                 "active_comments": len(self.active_comments),
+                "active_welcome": len(self.active_welcome),
                 "total_comments_displayed": self.total_comments_displayed,
                 "total_responses_displayed": self.total_responses_displayed,
                 "current_overlay_text": self.current_overlay_text,
