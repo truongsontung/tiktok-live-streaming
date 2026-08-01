@@ -24,6 +24,26 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         return _origFetch(input, init);
     };
+    // Hook XMLHttpRequest — tự động gán X-API-Key cho POST/DELETE (upload dùng XHR, không qua fetch wrapper)
+    (function () {
+        const _open = XMLHttpRequest.prototype.open;
+        const _send = XMLHttpRequest.prototype.send;
+        XMLHttpRequest.prototype.open = function (method) {
+            this._xhr_method = method;
+            return _open.apply(this, arguments);
+        };
+        XMLHttpRequest.prototype.send = function () {
+            const m = (this._xhr_method || "GET").toUpperCase();
+            if (!["GET", "HEAD", "OPTIONS"].includes(m)) {
+                const needKey = !["GET", "HEAD", "OPTIONS"].includes(m);
+                if (needKey) {
+                    try { this.setRequestHeader("X-API-Key", API_KEY || ""); } catch (e) {}
+                }
+            }
+            return _send.apply(this, arguments);
+        };
+    })();
+
     // Navigation Tabs (Desktop & Mobile)
     const navItems = document.querySelectorAll('.nav-item, .mobile-nav-item');
     const tabPages = document.querySelectorAll('.tab-page');
