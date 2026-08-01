@@ -217,8 +217,11 @@ def start_listener():
                 logger.info("Reply on cooldown, skipping")
                 return
             last_reply = now
-            # Uu tien product_url (link san pham thuc) > cart_link > keyword PRODUCTS match
-            cart_link = active_url or _extract_cart_link(comment_text, ai_response)
+            # Không bao gio dan URL chu (vi pham Community Guidelines).
+            # Relay: nhan duoc ai_response tu server; comment_forwarder chi la CTA tu nhien,
+            # voi huong dan nguoi dung an nut gio hang mau vang native tren video.
+            cart_link = ""  # luon trong so voi tranh vi pham
+            reply_text = ai_response
             reply_text = ai_response if not cart_link else f"{ai_response}\nMua ngay: {cart_link}"
             try:
                 await asyncio.wait_for(client.send_room_chat(reply_text), timeout=5)

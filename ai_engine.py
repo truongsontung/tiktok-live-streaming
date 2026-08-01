@@ -93,8 +93,26 @@ class AIResponseEngine:
         self.custom_system_prompt: str = None
         self.enabled: bool = False
         self.last_response_time: float = 0
-        self.response_cooldown: float = 2.0  # Minimum seconds between responses
-        self.max_comments_per_response: int = 3  # Process up to 3 comments at once
+        self.response_cooldown: float = 2.0
+        self.max_comments_per_response: int = 3
+
+        # Auto-load AI config from config.json -> preserve settings across restarts
+        try:
+            _cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+            if os.path.exists(_cfg_path):
+                _c = json.load(open(_cfg_path))
+                _ai = _c.get("ai_config", {})
+                if _ai:
+                    self.api_key = _ai.get("api_key")
+                    self.model = _ai.get("model", self.model)
+                    self.base_url = _ai.get("base_url")
+                    self.persona = _ai.get("persona", self.persona)
+                    self.custom_system_prompt = _ai.get("custom_system_prompt")
+                    if self.api_key and OPENAI_AVAILABLE:
+                        self.client = OpenAI(api_key=self.api_key, base_url=self.base_url or None)
+                        self.enabled = bool(_ai.get("enabled", self.enabled))
+        except Exception:
+            pass
         
         # Response cache
         self.response_cache: deque = deque(maxlen=self.MAX_RESPONSES_CACHE)
@@ -171,8 +189,12 @@ class AIResponseEngine:
             parts.append(
                 f"## Sản phẩm đang live\n"
                 f"Video live stream hiện đang giới thiệu sản phẩm: {product_tag}.\n"
-                f"Hãy trả lời ngắn gọn, tự nhiên, nhấn mạnh lợi ích/giá của {product_tag} "
-                f"và gợi gắn liên kết mua hàng (link giỏ hàng sẽ được chèn tự động)."
+                f"Hãy trả lời ngắn gọn, tự nhiên, nhấn mạnh lợi ích/giá của {product_tag}.\n\n"
+                f"**QUAN TRỌNG - QUY TẮC CỘNG ĐỒNG TIKTOK**:\n"
+                f"- KHÔNG BAO GIỜ dán/copy đường link URL chữ (https://...) vào phản hồi.\n"
+                f"- Nếu khách hỏi mua hàng, chỉ nêu lợi ích sản phẩm + gợi nhắc nhấn vào "
+                f"**nút giỏ hàng màu vàng (nút liên kết sản phẩm native)** ở góc màn hình video để mua.\n"
+                f"- Không được so sánh giá/đưa khuyến mãi quá mức. Giữ câu trả lời tự nhiên, tạo tương tác."
             )
         return "\n\n---\n\n".join(parts)
 
