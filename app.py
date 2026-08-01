@@ -443,6 +443,32 @@ async def upload_media(file: UploadFile = File(...)):
 
     _threading.Thread(target=_bg_convert, daemon=True).start()
 
+    # Auto-tag product_tag tu key tuong ung trong ten file upload
+    _filename_tag = {
+        "áo thun size m": "áo thun", "ao thun size m": "áo thun",
+        "áo thun": "áo thun", "ao thun": "áo thun",
+        "cạo râu điện": "cạo râu", "cạo râu": "cạo râu",
+    }
+    _fname = (file.filename or "").lower().replace("_", " ").replace("-", " ")
+    matched_tag = None
+    for kw, tag in sorted(_filename_tag.items(), key=lambda x: -len(x[0])):
+        if kw in _fname:
+            matched_tag = tag
+            break
+    if matched_tag:
+        _tags_path = os.path.join(LOGS_DIR, "video_tags.json")
+        tags = {}
+        if os.path.exists(_tags_path):
+            try:
+                tags = json.load(open(_tags_path))
+            except Exception:
+                tags = {}
+        if file.filename not in tags:
+            tags[file.filename] = {"product_tag": matched_tag, "cart_link": None, "keywords": matched_tag}
+        with open(_tags_path, "w") as f:
+            json.dump(tags, f, indent=2)
+        logger.info(f"Auto-tagged {file.filename} -> product_tag={matched_tag}")
+
     return {"success": True, "filename": file.filename, "size_mb": round(file_size / 1048576, 2), "converted": False, "message": "Đã lưu file, đang convert nền..."}
 
 
