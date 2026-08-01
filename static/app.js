@@ -191,11 +191,13 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // File Upload
+    let uploadActive = false;
     const fileUploadInput = document.getElementById('fileUploadInput');
     fileUploadInput.addEventListener('change', (e) => {
         const file = e.target.files[0];
         if (!file) return;
 
+        uploadActive = true;
         const formData = new FormData();
         formData.append('file', file);
 
@@ -212,6 +214,7 @@ document.addEventListener('DOMContentLoaded', () => {
         };
 
         xhr.onload = () => {
+            uploadActive = false;
             fileUploadInput.value = '';
             clearActiveToast();
             if (xhr.status === 200) {
@@ -231,11 +234,20 @@ document.addEventListener('DOMContentLoaded', () => {
         };
 
         xhr.onerror = () => {
+            uploadActive = false;
             clearActiveToast();
             showToast(`Lỗi kết nối khi tải ${file.name}`, 'rose');
         };
 
         xhr.send(formData);
+    });
+
+    // Prevent accidental navigation during upload
+    window.addEventListener('beforeunload', (e) => {
+        if (uploadActive) {
+            e.preventDefault();
+            e.returnValue = '';
+        }
     });
 
     // Telemetry Polling (every 2s)

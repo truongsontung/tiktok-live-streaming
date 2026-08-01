@@ -361,19 +361,18 @@ async def upload_media(file: UploadFile = File(...)):
                 raise HTTPException(status_code=413, detail="File quá lớn (max 600MB). Nén video hoặc cắt ngắn.")
             buffer.write(chunk)
 
-    # Check and convert video if needed (HEVC/H.265 → H.264 for concat compatibility)
-    # Use background thread to avoid blocking server (convert can take >120s)
-    detected_codec = subprocess.run(
-        ["ffprobe", "-v", "quiet", "-show_entries", "stream=codec_name", "-of", "csv=p=0", target_path],
-        capture_output=True, text=True, timeout=10
-    ).stdout.strip()
+    # Response immediately after file saved — convert runs fully async (non-blocking)
+    import threading as _threading
 
-    converted = False
-    if detected_codec not in ("h264", "avc"):
-        converted_name = "converted_" + file.filename
-        converted_path = os.path.join(MEDIA_DIR, converted_name)
-        def _bg_convert():
-            try:
+    def _bg_convert():
+        try:
+            detected_codec = subprocess.run(
+                ["ffprobe", "-v", "quiet", "-show_entries", "stream=codec_name", "-of", "csv=p=0", target_path],
+                capture_output=True, text=True, timeout=15
+            ).stdout.strip()
+            if detected_codec not in ("h264", "avc"):
+                converted_name = "converted_" + file.filename
+                converted_path = os.path.join(MEDIA_DIR, converted_name)
                 subprocess.run([
                     "ffmpeg", "-y", "-i", target_path,
                     "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:0:0:black,fps=30",
@@ -383,11 +382,13 @@ async def upload_media(file: UploadFile = File(...)):
                 ], capture_output=True, timeout=600)
                 if os.path.exists(converted_path) and os.path.getsize(converted_path) > 100000:
                     os.replace(converted_path, target_path)
-            except Exception as e:
-                logger.warning(f"Background convert failed for {file.filename}: {e}")
-        threading.Thread(target=_bg_convert, daemon=True).start()
+                    logger.info(f"Video converted to H.264: {file.filename}")
+        except Exception as e:
+            logger.warning(f"Background convert failed for {file.filename}: {e}")
 
-    return {"success": True, "filename": file.filename, "size_mb": round(file_size / 1048576, 2), "converted": converted}
+    _threading.Thread(target=_bg_convert, daemon=True).start()
+
+    return {"success": True, "filename": file.filename, "size_mb": round(file_size / 1048576, 2), "converted": False, "message": "Đã lưu file, đang convert nền..."}
 
 
 class TikTokUrlModel(BaseModel):
