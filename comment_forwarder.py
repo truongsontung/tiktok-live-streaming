@@ -192,7 +192,8 @@ def start_listener():
     active_media = fetch_active_media()
     active_tag = (active_media.get("product_tag") or "").strip()
     active_cart = active_media.get("cart_link")
-    logger.info(f"Active media product_tag: {active_tag or '(none)'} | cart_link: {active_cart or '(none)'}")
+    active_url = active_media.get("product_url") or active_cart
+    logger.info(f"Active media product_tag: {active_tag or '(none)'} | product_url: {active_url or '(none)'}")
 
     @client.on(CommentEvent)
     async def on_comment(event):
@@ -216,8 +217,8 @@ def start_listener():
                 logger.info("Reply on cooldown, skipping")
                 return
             last_reply = now
-            # Uu tien cart_link tu video dang live, sau do moi den PRODUCTS keyword
-            cart_link = active_cart or _extract_cart_link(comment_text, ai_response)
+            # Uu tien product_url (link san pham thuc) > cart_link > keyword PRODUCTS match
+            cart_link = active_url or _extract_cart_link(comment_text, ai_response)
             reply_text = ai_response if not cart_link else f"{ai_response}\nMua ngay: {cart_link}"
             try:
                 await asyncio.wait_for(client.send_room_chat(reply_text), timeout=5)

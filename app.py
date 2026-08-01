@@ -842,11 +842,13 @@ class TagMediaModel(BaseModel):
     filename: str
     product_tag: str
     cart_link: Optional[str] = None
+    product_url: Optional[str] = None
     keywords: Optional[str] = None
 
 
 @app.post("/api/media/tag")
 def tag_media(model: TagMediaModel):
+    """Gan product_tag + link san pham thuc (product_url affiliate) cho video."""
     path = os.path.join(LOGS_DIR, "video_tags.json")
     tags = {}
     if os.path.exists(path):
@@ -854,10 +856,15 @@ def tag_media(model: TagMediaModel):
             tags = json.load(open(path))
         except Exception:
             tags = {}
-    tags[model.filename] = {"product_tag": model.product_tag, "cart_link": model.cart_link, "keywords": model.keywords or ""}
+    tags[model.filename] = {
+        "product_tag": model.product_tag,
+        "cart_link": model.cart_link,
+        "product_url": model.product_url,
+        "keywords": model.keywords or "",
+    }
     with open(path, "w") as f:
         json.dump(tags, f, indent=2)
-    return {"success": True, "tagged": model.filename, "product_tag": model.product_tag}
+    return {"success": True, "tagged": model.filename, "product_tag": model.product_tag, "product_url": model.product_url}
 
 
 @app.get("/api/live/active-media")
@@ -875,6 +882,7 @@ def get_active_media():
     return {
         "filename": filename,
         "product_tag": tag.get("product_tag"),
+        "product_url": tag.get("product_url"),
         "cart_link": tag.get("cart_link"),
         "keywords": tag.get("keywords", ""),
     }
