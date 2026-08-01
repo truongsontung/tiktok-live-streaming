@@ -841,14 +841,15 @@ def forward_comment(req: ForwardCommentModel):
 class TagMediaModel(BaseModel):
     filename: str
     product_tag: str
-    cart_link: Optional[str] = None
     product_url: Optional[str] = None
+    cart_link: Optional[str] = None
+    product_id: Optional[str] = None
+    shop_id: Optional[str] = None
     keywords: Optional[str] = None
 
 
 @app.post("/api/media/tag")
 def tag_media(model: TagMediaModel):
-    """Gan product_tag + link san pham thuc (product_url affiliate) cho video."""
     path = os.path.join(LOGS_DIR, "video_tags.json")
     tags = {}
     if os.path.exists(path):
@@ -858,8 +859,10 @@ def tag_media(model: TagMediaModel):
             tags = {}
     tags[model.filename] = {
         "product_tag": model.product_tag,
-        "cart_link": model.cart_link,
         "product_url": model.product_url,
+        "cart_link": model.cart_link,
+        "product_id": model.product_id,
+        "shop_id": model.shop_id,
         "keywords": model.keywords or "",
     }
     with open(path, "w") as f:
@@ -869,7 +872,6 @@ def tag_media(model: TagMediaModel):
 
 @app.get("/api/live/active-media")
 def get_active_media():
-    """Trả info video dang live + product_tag/cart_link (dùng comment_forwarder)."""
     cfg = engine.load_config()
     filename = cfg.get("active_media")
     path = os.path.join(LOGS_DIR, "video_tags.json")
@@ -883,9 +885,69 @@ def get_active_media():
         "filename": filename,
         "product_tag": tag.get("product_tag"),
         "product_url": tag.get("product_url"),
+        "product_id": tag.get("product_id"),
+        "shop_id": tag.get("shop_id"),
         "cart_link": tag.get("cart_link"),
         "keywords": tag.get("keywords", ""),
     }
+
+
+@app.post("/api/tiktok/showcase/add")
+def add_to_showcase(filename: Optional[str] = None, product_id: Optional[str] = None,
+                    shop_id: Optional[str] = None):
+    """Them san pham vua roii vao Showcase cua Creator (Affiliate Creator API).
+    Tu dong lay product_id/shop_id tu video tag cua active_media, hoac dung product_id truyen dau vao.
+    Can TIKTOK_ACCESS_TOKEN env de xac thuc."""
+    import requests as _req
+    token = os.environ.get("TIKTOK_ACCESS_TOKEN", "")
+    if not token:
+        return {"success": False, "message": "Chua cau hinh TIKTOK_ACCESS_TOKEN (Creator API token)"}
+
+    cfg = engine.load_config()
+    active = filename or cfg.get("active_media")
+    tags_path = os.path.join(LOGS_DIR, "video_tags.json")
+    tag = {}
+    if active and os.path.exists(tags_path):
+        try:
+            tag = json.load(open(tags_path)).get(active, {})
+        except Exception:
+            tag = {}
+    pid = product_id or tag.get("product_id")
+    sid = shop_id or tag.get("shop_id")
+    if not pid or not sid:
+        return {"success": False, "message": "Can product_id + shop_id. Gan tag: POST /api/media/tag"}
+
+    resp = _req.post(
+        "https://business-api.tiktok.com/affiliate_creator/202405/showcases/products/add",
+        json={"product_id": pid, "shop_id": sid},
+        headers={"X-Access-Token": token, "Content-Type": "application/json"},
+        timeout=20,
+    )
+    try:
+        data = resp.json()
+    except Exception:
+        data = {"raw": resp.text[:300]}
+    if resp.status_code == 200 and data.get("data", {}).get("success") is not False:
+        return {"success": True, "message": "Da them san pham vao Showcase (nhan len duoi live mau vang)", "response": data}
+    return {"success": False, "message": f"Showcase add failed HTTP {resp.status_code}", "response": data}
+
+
+@app.get("/api/tiktok/showcase")
+def get_showcase_products():
+    """Lay danh sach san pham trong Showcase cua Creator."""
+    import requests as _req
+    token = os.environ.get("TIKTOK_ACCESS_TOKEN", "")
+    if not token:
+        return {"products": [], "message": "Chua cau hinh TIKTOK_ACCESS_TOKEN"}
+    resp = _req.get(
+        "https://business-api.tiktok.com/affiliate_creator/202405/showcases/products",
+        headers={"X-Access-Token": token, "Content-Type": "application/json"},
+        timeout=20,
+    )
+    try:
+        return {"products": resp.json().get("data", {}).get("product_list", []), "http": resp.status_code}
+    except Exception:
+        return {"products": [], "error": resp.text[:200]}
 
 @app.get("/api/live/gifts")
 def get_live_gifts(count: int = 10):

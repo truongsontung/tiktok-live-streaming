@@ -191,9 +191,14 @@ def start_listener():
     # Fetch active video product_tag (AI trả lời theo sản phẩm đang live)
     active_media = fetch_active_media()
     active_tag = (active_media.get("product_tag") or "").strip()
-    active_cart = active_media.get("cart_link")
-    active_url = active_media.get("product_url") or active_cart
+    active_url = active_media.get("product_url") or active_media.get("cart_link")
     logger.info(f"Active media product_tag: {active_tag or '(none)'} | product_url: {active_url or '(none)'}")
+
+    # Auto-add san pham dang active (co product_id + shop_id) vao Showcase Creator
+    if active_media.get("product_id") and active_media.get("shop_id"):
+        _fname = active_media.get("filename") or ""
+        _r = _fetch_json(f"{SERVER_URL}/api/tiktok/showcase/add?filename={_fname}")
+        logger.warning(f"Showcase add triggered for {_fname}: {_r}")
 
     @client.on(CommentEvent)
     async def on_comment(event):
