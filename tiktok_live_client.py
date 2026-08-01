@@ -120,6 +120,24 @@ class TikTokLiveClientManager:
                 except Exception as e:
                     logger.error(f"Error in comment callback: {e}")
 
+            # Server-side AI reply directly (fire-and-forget, không block handler/request)
+            try:
+                from app import ai_engine
+                if ai_engine.enabled and getattr(self.client, "is_connected", False):
+                    loop = asyncio.get_event_loop()
+                    loop.create_task(self._ai_reply_async(ai_engine, cmd))
+            except Exception as e:
+                logger.warning(f"Server-side AI reply dispatch failed: {e}")
+
+    async def _ai_reply_async(self, ai_engine, cmd):
+        try:
+            ai_reply = ai_engine.generate_response(cmd.comment, getattr(cmd.user, "nickname", "Viewer"))
+            if ai_reply:
+                await asyncio.wait_for(self.client.send_room_chat(ai_reply), timeout=8)
+                logger.info(f"[AI reply] @{getattr(cmd.user,'nickname','?')}: {ai_reply[:60]}")
+        except Exception as e:
+            logger.warning(f"Server-side AI reply failed: {e}")
+
     def inject_comment(self, username: str, comment: str, trigger_ai: bool = True):
         """Inject an external comment (e.g. from proxy-forwarder) as if received live."""
         if not username or not comment:
