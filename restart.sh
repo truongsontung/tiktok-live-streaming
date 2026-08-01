@@ -3,6 +3,8 @@ cd /home/vps2/tiktok_live || exit 1
 
 echo "[restart] stopping server..."
 pkill -9 -f "venv/bin/python3 app.py" 2>/dev/null
+# Kill ALL FFmpeg orphans (rtmp encode + dashboard preview -> prevent CPU full + jitter)
+pkill -9 -f "ffmpeg" 2>/dev/null
 sleep 2
 
 echo "[restart] waiting for port 8888 to release..."
