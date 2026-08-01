@@ -232,6 +232,7 @@ class StreamEngine:
         # Base FFmpeg command
         cmd = [
             "ffmpeg", "-y",
+            "-fflags", "+genpts+igndts",
             "-re",
             "-f", "concat",
             "-safe", "0",
@@ -245,7 +246,12 @@ class StreamEngine:
         filter_str = f"scale={resolution}:force_original_aspect_ratio=decrease,pad={w}:{h}:0:0:black"
         
         # Build drawtext filters using overlay renderer
-        overlay_renderer.set_enabled(True)
+        overlay_renderer.set_enabled(config.get("overlay_enabled", True))
+        overlay_config = config.get("overlay_config")
+        if overlay_config:
+            for k, v in (overlay_config.items() if isinstance(overlay_config, dict) else []):
+                if k in overlay_renderer.enabled_overlays:
+                    overlay_renderer.enabled_overlays[k] = v
         drawtext_args = overlay_renderer.get_ffmpeg_drawtext_args(config)
         if drawtext_args:
             filter_str += "," + ",".join(drawtext_args)
@@ -255,10 +261,10 @@ class StreamEngine:
             "-c:v", "libx264",
             "-preset", "veryfast",
             "-tune", "zerolatency",
-            "-g", str(fps * 2),
+            "-g", str(fps),
             "-b:v", v_bitrate,
             "-maxrate", v_bitrate,
-            "-bufsize", f"{int(v_bitrate.replace('k',''))*2}k",
+            "-bufsize", v_bitrate,
             "-pix_fmt", "yuv420p",
             "-c:a", "aac",
             "-b:a", a_bitrate,

@@ -6,6 +6,7 @@ With Automatic TikTok Stream Key Retrieval, AI Response Engine, and Live Comment
 
 import os
 import json
+import secrets
 import subprocess
 import threading
 import urllib.request
@@ -151,9 +152,23 @@ def get_config():
 
 @app.post("/api/config")
 def save_config(cfg: ConfigModel):
-    data = cfg.dict()
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+    new = cfg.dict()
+    old_path = CONFIG_FILE
+    old = {}
+    if os.path.exists(old_path):
+        with open(old_path, "r") as f:
+            old = json.load(f)
+    writable = {"resolution","video_bitrate","audio_bitrate","fps","mode",
+                "loop","auto_reconnect","overlay_text","show_clock","ai_enabled","ai_config"}
+    for k in writable:
+        v = new.get(k)
+        if v is not None and v != "":
+            old[k] = v
+    if not old.get("api_key_secret"):
+        old["api_key_secret"] = secrets.token_hex(32)
+    with open(old_path, "w") as f:
+        json.dump(old, f, indent=2)
+    engine.load_config()
     return {"success": True, "message": "Configuration saved successfully!"}
 
 @app.post("/api/tiktok/fetch-stream-key")
