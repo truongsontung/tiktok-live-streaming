@@ -171,6 +171,22 @@ def save_config(cfg: ConfigModel):
     engine.load_config()
     return {"success": True, "message": "Configuration saved successfully!"}
 
+def _extract_tt_target_idc(resp) -> Optional[str]:
+    """Extract tt-target-idc cookie value from urllib HTTP response headers."""
+    try:
+        cookies = resp.headers.get_all("Set-Cookie") or []
+        for cookie in cookies:
+            for part in cookie.split(";"):
+                part = part.strip()
+                if part.startswith("tt-target-idc="):
+                    val = part.split("=", 1)[1].strip()
+                    if val:
+                        return val
+    except Exception:
+        pass
+    return None
+
+
 @app.post("/api/tiktok/fetch-stream-key")
 def fetch_tiktok_stream_key(req: TikTokSessionModel):
     sess_id = req.session_id.strip()
@@ -232,6 +248,10 @@ def fetch_tiktok_stream_key(req: TikTokSessionModel):
                 current_cfg = engine.load_config()
                 current_cfg["rtmp_url"] = rtmp_url
                 current_cfg["stream_key"] = stream_key
+                _tt = _extract_tt_target_idc(resp)
+                if _tt:
+                    current_cfg["tiktok_tt_target_idc"] = _tt
+                    logger.info(f"Extracted tt-target-idc: {_tt}")
                 with open(CONFIG_FILE, "w") as f:
                     json.dump(current_cfg, f, indent=2)
 
@@ -258,6 +278,8 @@ def fetch_tiktok_stream_key(req: TikTokSessionModel):
                 current_cfg = engine.load_config()
                 current_cfg["rtmp_url"] = result["rtmp_url"]
                 current_cfg["stream_key"] = result["stream_key"]
+                if result.get("tt_target_idc"):
+                    current_cfg["tiktok_tt_target_idc"] = result["tt_target_idc"]
                 with open(CONFIG_FILE, "w") as f:
                     json.dump(current_cfg, f, indent=2)
                 return {
@@ -278,6 +300,8 @@ def fetch_tiktok_stream_key(req: TikTokSessionModel):
                 current_cfg = engine.load_config()
                 current_cfg["rtmp_url"] = result["rtmp_url"]
                 current_cfg["stream_key"] = result["stream_key"]
+                if result.get("tt_target_idc"):
+                    current_cfg["tiktok_tt_target_idc"] = result["tt_target_idc"]
                 with open(CONFIG_FILE, "w") as f:
                     json.dump(current_cfg, f, indent=2)
                 return {
@@ -334,6 +358,7 @@ def get_stream_key_status():
         "has_stream_key": has_key,
         "rtmp_url": config.get("rtmp_url", ""),
         "stream_key": "••••••••" + config.get("stream_key", "")[-4:] if has_key else "",
+        "tt_target_idc": config.get("tiktok_tt_target_idc", ""),
         "scraper_available": scraper.available,
         "scraper_status": scraper.get_telemetry(),
     }
@@ -795,8 +820,9 @@ def live_session_info():
     cfg = engine.load_config()
     return {
         "username": (cfg.get("tiktok_username") or "").strip().lstrip("@"),
-        "server_url": None,  # forwarder tự biết server URL qua env SERVER_URL
+        "server_url": None,
         "tiktok_session": cfg.get("tiktok_session", ""),
+        "tiktok_tt_target_idc": cfg.get("tiktok_tt_target_idc", ""),
         "live_client_connected": live_client.is_connected,
     }
 

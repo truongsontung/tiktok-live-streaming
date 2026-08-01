@@ -33,6 +33,9 @@ PRODUCTS = {
 
 
 import os
+# Whitelist the EulerStream sign-server host BEFORE TikTokLive is imported,
+# so TikTokLive's check_authenticated_session() allows authenticated session.
+os.environ.setdefault("WHITELIST_AUTHENTICATED_SESSION_ID_HOST", "api.eulerstream.com")
 import sys
 import time
 import json
@@ -119,6 +122,37 @@ def fetch_active_media():
     return {}
 
 
+def _fetch_tt_target_idc_from_tiktok(session_id: str) -> str:
+    """Fallback: extract tt-target-idc cookie from TikTok webcast API response."""
+    if not session_id:
+        return ""
+    try:
+        cookie_str = f"sessionid={session_id}; sessionid_ss={session_id}; sid_tt={session_id}; sid_api={session_id}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "Cookie": cookie_str,
+            "Accept": "application/json, text/plain, */*",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Referer": "https://www.tiktok.com/",
+            "Origin": "https://www.tiktok.com",
+        }
+        post_data = "device_platform=web&aid=1988&app_language=en&app_name=tiktok_web&browser_name=Mozilla&browser_version=5.0&channel=googleios&api_service_version=2&live_type=1&stream_type=push&mode=web&quality=normal"
+        req = urllib.request.Request(
+            "https://webcast.tiktok.com/webcast/room/create/",
+            data=post_data.encode(), headers=headers,
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            set_cookies = resp.headers.get_all("Set-Cookie") or []
+            for cookie in set_cookies:
+                for part in cookie.split(";"):
+                    part = part.strip()
+                    if part.startswith("tt-target-idc=") and len(part) > len("tt-target-idc="):
+                        return part.split("=", 1)[1].strip()
+    except Exception as e:
+        logger.warning(f"tt-target-idc fallback extract failed: {e}")
+    return ""
+
+
 def forward_comment(username: str, comment: str, api_secret: str, product_tag: str = None) -> dict:
     payload = {"username": username, "comment": comment}
     if product_tag:
@@ -184,18 +218,14 @@ def start_listener():
         try:
             _sc, _si = _fetch_json(f"{SERVER_URL}/api/live/session-info")
             _sid = ((_si or {}).get("tiktok_session") or "").strip()
+            _tt = ((_si or {}).get("tiktok_tt_target_idc") or "").strip()
             if _sid:
-                # Xoa tt-target-idc conflict trong httpx jar (root cause "Multiple cookies exist")
-                try:
-                    _jar = getattr(client.web.cookies, "jar", None) or client.web.cookies
-                    if hasattr(_jar, "remove"):
-                        for _c in list(_jar):
-                            if getattr(_c, "name", "") == "tt-target-idc":
-                                _jar.remove(_c)
-                except Exception:
-                    pass
-                client.web.set_session(_sid, None)
-                logger.info("Session cookie configured (send_room_chat reply auth)")
+                # Nếu server chưa có tt-target-idc, tự trích xuất từ API TikTok
+                if not _tt:
+                    _tt = _fetch_tt_target_idc_from_tiktok(_sid)
+                    logger.info(f"tt-target-idc extracted locally: {_tt or '(failed)'}")
+                client.web.set_session(_sid, _tt or None)
+                logger.info(f"Session configured for send_room_chat (sid={_sid[:16]}..., tt_idc={_tt or 'none'})")
         except Exception as e:
             logger.warning(f"set_session failed (reply co the loi): {e}")
     except Exception as e:

@@ -56,7 +56,7 @@ class LiveStudioScraper:
                     sess_id = item.split("=", 1)[1].strip()
                     break
 
-        result = {"rtmp_url": None, "stream_key": None}
+        result = {"rtmp_url": None, "stream_key": None, "tt_target_idc": None}
 
         try:
             with sync_playwright() as p:
@@ -95,6 +95,20 @@ class LiveStudioScraper:
                 # Intercept network responses to find stream key
                 def handle_response(response):
                     try:
+                        # Extract tt-target-idc from response headers
+                        if not result.get("tt_target_idc"):
+                            try:
+                                for hname, hval in response.headers.items():
+                                    if hname.lower() == "set-cookie" and "tt-target-idc=" in hval:
+                                        for part in hval.split(";"):
+                                            part = part.strip()
+                                            if part.startswith("tt-target-idc="):
+                                                val = part.split("=", 1)[1].strip()
+                                                if val:
+                                                    result["tt_target_idc"] = val
+                                                    break
+                            except Exception:
+                                pass
                         url = response.url
                         if 'webcast' in url and ('room/create' in url or 'stream' in url.lower() or 'push_url' in url.lower()):
                             try:
@@ -159,6 +173,35 @@ class LiveStudioScraper:
                                     result["rtmp_url"] = parts[0] + "/"
                                     result["stream_key"] = parts[1]
                                 print("[Scraper] RTMPS stream key extracted via POST!", flush=True)
+
+                                # Extract tt-target-idc from response headers (needed for send_room_chat auth)
+                                if not result["tt_target_idc"]:
+                                    try:
+                                        for hname, hval in resp.headers_list:
+                                            if hname.lower() == "set-cookie" and "tt-target-idc=" in hval:
+                                                for part in hval.split(";"):
+                                                    part = part.strip()
+                                                    if part.startswith("tt-target-idc="):
+                                                        val = part.split("=", 1)[1].strip()
+                                                        if val:
+                                                            result["tt_target_idc"] = val
+                                                            print(f"[Scraper] tt-target-idc extracted: {val}", flush=True)
+                                                        break
+                                            if result["tt_target_idc"]:
+                                                break
+                                    except Exception as _e:
+                                        print(f"[Scraper] tt-target-idc extract failed: {_e}", flush=True)
+
+                                # Fallback: get from context cookies
+                                if not result["tt_target_idc"]:
+                                    try:
+                                        for _c in context.cookies():
+                                            if _c.get("name") == "tt-target-idc" and _c.get("value"):
+                                                result["tt_target_idc"] = _c["value"]
+                                                print(f"[Scraper] tt-target-idc via cookies: {_c['value']}", flush=True)
+                                                break
+                                    except Exception:
+                                        pass
                         except:
                             pass
                 except Exception as e:
