@@ -155,9 +155,6 @@ class StreamEngine:
             codec = self._get_video_codec(video_path)
             if codec and codec not in ("h264", "avc"):
                 temp_path = os.path.join(LOGS_DIR, "converted_" + os.path.basename(video_path))
-                if os.path.exists(temp_path):
-                    self._temp_files.append(temp_path)
-                    continue
                 logger.info(f"Converting {os.path.basename(video_path)} ({codec}) to H.264...")
                 self._convert_to_h264(video_path, temp_path, resolution)
                 if os.path.exists(temp_path) and os.path.getsize(temp_path) > 1000:
@@ -329,7 +326,14 @@ class StreamEngine:
             else:
                 logger.warning("Failed to connect to TikTok live room, streaming without live interaction")
 
-        # Convert incompatible videos before starting (non-blocking)
+        # Clear stale convert cache so new playlist always re-resolves
+        self._temp_files = []
+        import glob as _glob
+        for old in _glob.glob(os.path.join(LOGS_DIR, "converted_*.mp4")):
+            try: os.remove(old)
+            except: pass
+
+        # Convert incompatible videos before starting
         self._convert_incompatible(config)
 
         # Start comment processor thread
