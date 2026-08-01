@@ -1,26 +1,36 @@
 #!/usr/bin/env python3
 """
-External TikTok Live comment forwarder.
+External TikTok Live Comment Forwarder + Auto-Reply.
 
-Chay trên một máy/instance có IP sạch (hoặc qua proxy HTTP) để lắng nghe
-real-time comments từ TikTok WebSocket, sau đó forward tới server chính qua
-endpoint POST /api/live/comment-forward.
+Chay tren may local / IP sach / proxy de lang nghe comment thoi:
+  - Tu-f dong username va api_key_secret tu server (zero config)
+  - Forward comment -> server AI -> nhan ai_response + action
+  - Reply len comment panel (send_room_chat) hoac pin comment len dan top
 
-Lý do tách biệt:
-  - VPS thường bị webcast.tiktok.com handshake 403 → WebSocket listener lỗi.
-  - Chạy forwarder trên máy local/proxy → nhận comment thật → gửi về server.
-
-Cấu hình (environment variables):
-  USERNAME        : TikTok username đang live (bắt buộc)
-  SERVER_URL      : http://[vps-ip]:8888  (mặc định http://127.0.0.1:8888)
-  WEB_PROXY       : http://user:pass@ip:port  (nếu dùng proxy)
-  WS_PROXY        : ws://user:pass@ip:port
-  FORWARD_COOLDOWN: số giây tối thiểu giữa 2 forward (tránh flood)
-
-Usage:
-  python3 comment_forwarder.py
-  USERNAME=songoku_superboy SERVER_URL=http://127.0.0.1:8888 python3 comment_forwarder.py
+Env:
+  SERVER_URL    : https://freeforyou.win/tiktok_live (default)
+  BASIC_AUTH    : "admin:tiktok99"  (neu qua nginx co auth)
+  USERNAME      : override (skip auto-fetch)
+  WEB_PROXY     : ws proxy HTTP (neu 403 webcast)
+  COMMENT_COOLDOWN, REPLY_COOLDOWN ...
 """
+
+# ---- Shopping cart config (hardcoded product links) ----
+PRODUCTS = {
+    "áo thun": {
+        "link": "https://freeforyou.win/shop/ao-thun",
+        "price": "200k",
+    },
+    "size m": {
+        "link": "https://freeforyou.win/shop/ao-thun?variant=M",
+        "price": "200k",
+    },
+    "giỏ hàng": {
+        "link": "https://freeforyou.win/shop/cart",
+        "price": None,
+    },
+}
+
 
 import os
 import sys
@@ -85,10 +95,19 @@ def _fetch_json(url, data=None):
         return None, {}
 
 def fetch_api_secret():
-    """Lấy api_key_secret từ GET /api/config (để gửi X-API-Key cho POST comment-forward)."""
+    """Lay api_key_secret tu GET /api/config (gui X-API-Key cho POST comment-forward)."""
     code, data = _fetch_json(f"{SERVER_URL}/api/config")
     if code == 200 and data.get("api_key_secret"):
         return data["api_key_secret"]
+    return None
+
+
+def _extract_cart_link(comment: str, ai_response: str) -> str:
+    """Scan comment/reply de tim tu khoa san pham -> tra ve link gio hang."""
+    combined = f"{comment} {ai_response}".lower()
+    for keyword, info in PRODUCTS.items():
+        if keyword in combined:
+            return info["link"]
     return None
 
 
@@ -175,15 +194,18 @@ def start_listener():
 
         result = forward_comment(nickname, str(comment_text), api_secret)
         ai_response = result.get("ai_response") if isinstance(result, dict) else None
+        action = result.get("action") if isinstance(result, dict) else None
         if ai_response:
-            # Reply the AI-generated response back onto TikTok comment panel
             if now - last_reply < REPLY_COOLDOWN:
                 logger.info("Reply on cooldown, skipping")
                 return
             last_reply = now
+            # Ghep link gio hang tu ban comment + ai_response
+            cart_link = _extract_cart_link(comment_text, ai_response)
+            reply_text = ai_response if not cart_link else f"{ai_response}\nMua ngay: {cart_link}"
             try:
-                await asyncio.wait_for(client.send_room_chat(ai_response), timeout=5)
-                logger.info(f"Replied: {ai_response}")
+                await asyncio.wait_for(client.send_room_chat(reply_text), timeout=5)
+                logger.warning(f"Replied (cart): {reply_text}")
             except Exception as e:
                 logger.error(f"Reply failed: {e}")
 
