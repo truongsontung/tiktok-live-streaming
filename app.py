@@ -420,28 +420,39 @@ async def download_tiktok_video(req: TikTokUrlModel):
 
     def _bg_download():
         video_url = None
+        download_attempts = [
+            "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/best",
+            "best",
+            "mp4",
+        ]
         try:
-            # Method 1: try yt-dlp first
+            # Method 1: try yt-dlp first (retry with different formats)
             from yt_dlp import YoutubeDL
-            ydl_opts = {
-                "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/best",
-                "outtmpl": target_path,
-                "quiet": True,
-                "no_warnings": True,
-                "socket_timeout": 60,
-                "retries": 2,
-            }
-            try:
-                with YoutubeDL(ydl_opts) as ydl:
-                    ydl.download([url])
-                if os.path.exists(target_path):
-                    logger.info(f"TikTok video downloaded via yt-dlp: {raw_filename}")
-                    video_url = target_path
-            except Exception as yt_err:
-                logger.warning(f"yt-dlp failed: {yt_err}, trying Playwright fallback...")
-                if os.path.exists(target_path):
-                    os.remove(target_path)
-                video_url = None
+            import random, time as dl_time
+            for attempt, fmt in enumerate(download_attempts):
+                ydl_opts = {
+                    "format": fmt,
+                    "outtmpl": target_path,
+                    "quiet": True,
+                    "no_warnings": True,
+                    "socket_timeout": 90,
+                    "retries": 2,
+                    "impersonate": "chrome",
+                }
+                try:
+                    with YoutubeDL(ydl_opts) as ydl:
+                        ydl.download([url])
+                    if os.path.exists(target_path) and os.path.getsize(target_path) > 100000:
+                        logger.info(f"TikTok video downloaded via yt-dlp (format {attempt+1}): {raw_filename}")
+                        video_url = target_path
+                        break
+                    if os.path.exists(target_path):
+                        os.remove(target_path)
+                except Exception as yt_err:
+                    logger.warning(f"yt-dlp attempt {attempt+1} failed: {yt_err}")
+                    if os.path.exists(target_path):
+                        os.remove(target_path)
+                dl_time.sleep(random.uniform(3, 6))
         except Exception:
             pass
 

@@ -192,7 +192,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // File Upload
     const fileUploadInput = document.getElementById('fileUploadInput');
-    fileUploadInput.addEventListener('change', async (e) => {
+    fileUploadInput.addEventListener('change', (e) => {
         const file = e.target.files[0];
         if (!file) return;
 
@@ -200,17 +200,41 @@ document.addEventListener('DOMContentLoaded', () => {
         formData.append('file', file);
 
         showToast(`Đang tải lên ${file.name}...`, 'cyan');
-        try {
-            const res = await fetch('api/media/upload', {
-                method: 'POST',
-                body: formData
-            });
-            const data = await res.json();
-            showToast(`Tải lên ${file.name} thành công!`, 'emerald');
-            loadMediaList();
-        } catch (err) {
-            showToast(`Lỗi tải lên: ${err.message}`, 'rose');
-        }
+
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', 'api/media/upload');
+
+        xhr.upload.onprogress = (event) => {
+            if (event.lengthComputable) {
+                const percent = Math.round((event.loaded / event.total) * 100);
+                showToast(`Tải lên ${file.name}: ${percent}%`, 'cyan');
+            }
+        };
+
+        xhr.onload = () => {
+            fileUploadInput.value = '';
+            if (xhr.status === 200) {
+                const data = JSON.parse(xhr.responseText);
+                if (data.converted) {
+                    showToast(`Tải lên ${file.name} thành công! Đã convert H.264`, 'emerald');
+                } else {
+                    showToast(`Tải lên ${file.name} thành công! Đang convert nền...`, 'emerald');
+                }
+                loadMediaList();
+                setTimeout(() => {
+                    loadMediaList();
+                    if (typeof loadPlaylist === 'function') loadPlaylist();
+                }, 3000);
+            } else {
+                showToast(`Lỗi tải lên (${xhr.status})`, 'rose');
+            }
+        };
+
+        xhr.onerror = () => {
+            showToast(`Lỗi kết nối khi tải ${file.name}`, 'rose');
+        };
+
+        xhr.send(formData);
     });
 
     // Telemetry Polling (every 2s)
