@@ -31,7 +31,7 @@ import logging
 import urllib.request
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,
     format="[%(asctime)s] [Forwarder] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
