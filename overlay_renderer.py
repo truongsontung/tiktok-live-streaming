@@ -30,11 +30,11 @@ class OverlayRenderer:
     def __init__(self):
         self.enabled: bool = False
         self.enabled_overlays = {
-            "clock": True,
-            "comment_scroll": True,
-            "ai_response": True,
-            "viewer_count": True,
-            "stats_panel": True,
+            "clock": False,
+            "comment_scroll": False,
+            "ai_response": False,
+            "viewer_count": False,
+            "stats_panel": False,
         }
         self.max_comment_lines: int = 6
         self.comment_scroll_speed: float = 30.0  # pixels per second
@@ -291,23 +291,23 @@ class OverlayRenderer:
             args.append(f"drawtext=text='{text}':x=(w-tw)/2:y=30:fontsize=36:fontcolor=white:box=1:boxcolor=black@0.6:boxborderw=10:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
         
         # Clock (dynamic from file)
-        if config.get("show_clock", True):
+        if self.enabled and config.get("show_clock", False):
             args.append(f"drawtext=textfile={self.text_files['clock']}:x=(w-tw)/2:y=w/4:fontsize=48:fontcolor=yellow:box=1:boxcolor=black@0.6:boxborderw=10:reload=1:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
         
         # Dynamic comment overlay
-        if self.enabled and self.enabled_overlays.get("comment_scroll", True):
+        if self.enabled and self.enabled_overlays.get("comment_scroll", False):
             args.append(f"drawtext=textfile={self.text_files['comment']}:x=20:y=h-th-120:fontsize=24:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=5:reload=1:line_spacing=10:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
         
         # AI response overlay
-        if self.enabled and self.enabled_overlays.get("ai_response", True):
+        if self.enabled and self.enabled_overlays.get("ai_response", False):
             args.append(f"drawtext=textfile={self.text_files['ai_response']}:x=(w-tw)/2:y=h/2:fontsize=28:fontcolor=cyan:box=1:boxcolor=black@0.6:boxborderw=8:reload=1:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
         
         # Stats panel
-        if self.enabled and self.enabled_overlays.get("stats_panel", True):
+        if self.enabled and self.enabled_overlays.get("stats_panel", False):
             args.append(f"drawtext=textfile={self.text_files['stats']}:x=20:y=80:fontsize=20:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=5:reload=1:line_spacing=8:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
         
         # Title overlay
-        if self.current_overlay_text:
+        if self.enabled and self.current_overlay_text:
             args.append(f"drawtext=textfile={self.text_files['title']}:x=(w-tw)/2:y=10:fontsize=28:fontcolor=white:box=1:boxcolor=royalblue@0.6:boxborderw=10:reload=1:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
         
         return args

@@ -246,7 +246,7 @@ class StreamEngine:
         filter_str = f"scale={resolution}:force_original_aspect_ratio=decrease,pad={w}:{h}:0:0:black"
         
         # Build drawtext filters using overlay renderer
-        overlay_renderer.set_enabled(config.get("overlay_enabled", True))
+        overlay_renderer.set_enabled(config.get("overlay_enabled", False))
         overlay_config = config.get("overlay_config")
         if overlay_config:
             for k, v in (overlay_config.items() if isinstance(overlay_config, dict) else []):
@@ -334,8 +334,8 @@ class StreamEngine:
             ai_engine.configure(ai_config["api_key"], model, persona, base_url, custom_prompt)
             ai_engine.set_enabled(True)
 
-        # Configure overlay renderer
-        overlay_renderer.set_enabled(True)
+        # Configure overlay renderer (respect config, default to OFF)
+        overlay_renderer.set_enabled(config.get("overlay_enabled", False))
 
         # Configure live client if tiktok username is provided
         tiktok_username = config.get("tiktok_username", "")
@@ -429,7 +429,7 @@ class StreamEngine:
             
             filter_str = f"scale={pw}:{ph}:force_original_aspect_ratio=decrease,pad={pw}:{ph}:0:0:black,fps=2"
             # Chỉ build drawtext nếu overlay thực sự bật (tránh preview render stats khi đã tắt overlay)
-            if overlay_renderer.enabled and config.get("overlay_enabled", True):
+            if overlay_renderer.enabled and config.get("overlay_enabled", False):
                 drawtext_args = overlay_renderer.get_ffmpeg_drawtext_args(config)
             else:
                 drawtext_args = []
