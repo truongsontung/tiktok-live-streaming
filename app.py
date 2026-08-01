@@ -634,6 +634,9 @@ def configure_ai(config: AIConfigModel):
     
     # Save to config file
     current_cfg = engine.load_config()
+    if not current_cfg.get("api_key_secret"):
+        import secrets as _secrets
+        current_cfg["api_key_secret"] = _secrets.token_hex(16)
     current_cfg["ai_enabled"] = config.enabled
     current_cfg["ai_config"] = {
         "api_key": config.api_key,
