@@ -182,7 +182,7 @@ def start_listener():
                 return
             last_reply = now
             try:
-                await asyncio.wait_for(client.comment(ai_response), timeout=5)
+                await asyncio.wait_for(client.send_room_chat(ai_response), timeout=5)
                 logger.info(f"Replied: {ai_response}")
             except Exception as e:
                 logger.error(f"Reply failed: {e}")
