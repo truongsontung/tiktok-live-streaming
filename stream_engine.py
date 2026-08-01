@@ -203,23 +203,9 @@ class StreamEngine:
         a_bitrate = config.get("audio_bitrate", "128k")
 
         # Use pre-converted H.264 files if available (avoids concat codec mismatch)
-        compatible_playlist = []
-        for video_path in playlist:
-            temp_path = os.path.join(LOGS_DIR, "converted_" + os.path.basename(video_path))
-            if hasattr(self, '_temp_files') and temp_path in self._temp_files and os.path.exists(temp_path):
-                compatible_playlist.append(temp_path)
-            else:
-                codec = self._get_video_codec(video_path)
-                if codec and codec not in ("h264", "avc") and os.path.exists(temp_path):
-                    compatible_playlist.append(temp_path)
-                else:
-                    compatible_playlist.append(video_path)
+        compatible_playlist = self._write_playlist(config)
 
-        # Write playlist with compatible files
         playlist_txt = os.path.join(LOGS_DIR, "playlist.txt")
-        with open(playlist_txt, "w") as f:
-            for video_path in compatible_playlist:
-                f.write(f"file '{video_path}'\n")
 
         # Base FFmpeg command
         cmd = [
@@ -352,8 +338,32 @@ class StreamEngine:
         self._key_refresh_thread.start()
         return True, "Streaming starting in background daemon."
 
+    def _write_playlist(self, config):
+        """Write the current media playlist to logs/playlist.txt (fresh content)."""
+        playlist = self.get_media_playlist()
+        compatible_playlist = []
+        for video_path in playlist:
+            temp_path = os.path.join(LOGS_DIR, "converted_" + os.path.basename(video_path))
+            if temp_path in getattr(self, '_temp_files', []) and os.path.exists(temp_path):
+                compatible_playlist.append(temp_path)
+            else:
+                codec = self._get_video_codec(video_path)
+                if codec and codec not in ("h264", "avc") and os.path.exists(temp_path):
+                    compatible_playlist.append(temp_path)
+                else:
+                    compatible_playlist.append(video_path)
+
+        playlist_txt = os.path.join(LOGS_DIR, "playlist.txt")
+        if compatible_playlist:
+            with open(playlist_txt, "w") as f:
+                for video_path in compatible_playlist:
+                    f.write(f"file '{video_path}'\n")
+        return compatible_playlist
+
     def _start_preview(self, config):
         """Start a lightweight FFmpeg process for dashboard preview."""
+        # Ensure playlist.txt is fresh before starting preview
+        self._write_playlist(config)
         try:
             playlist_txt = os.path.join(LOGS_DIR, "playlist.txt")
             if not os.path.exists(playlist_txt):
