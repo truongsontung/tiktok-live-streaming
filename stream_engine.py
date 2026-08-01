@@ -318,7 +318,9 @@ class StreamEngine:
         if ai_config.get("enabled", False) and ai_config.get("api_key"):
             model = ai_config.get("model", "gpt-4o-mini")
             persona = ai_config.get("persona", "assistant")
-            ai_engine.configure(ai_config["api_key"], model, persona)
+            base_url = ai_config.get("base_url")
+            custom_prompt = ai_config.get("custom_system_prompt")
+            ai_engine.configure(ai_config["api_key"], model, persona, base_url, custom_prompt)
             ai_engine.set_enabled(True)
 
         # Configure overlay renderer
@@ -327,7 +329,11 @@ class StreamEngine:
         # Configure live client if tiktok username is provided
         tiktok_username = config.get("tiktok_username", "")
         if tiktok_username and live_client.is_available():
-            live_client.configure(tiktok_username)
+            live_client.configure(
+                tiktok_username,
+                web_proxy=config.get("tiktok_web_proxy"),
+                ws_proxy=config.get("tiktok_ws_proxy")
+            )
             connected = live_client.connect_async()
             if connected:
                 logger.info(f"Connected to TikTok live room for: @{tiktok_username}")
@@ -594,7 +600,13 @@ class StreamEngine:
                 logger.info(f"Auto-reconnecting stream (Attempt #{self.reconnect_count})... Waiting 5 seconds.")
                 with self.lock:
                     self.status = "RECONNECTING"
-                time.sleep(5)
+                # Re-check should_stop periodically during reconnect delay
+                for _ in range(50):
+                    if self.should_stop:
+                        break
+                    time.sleep(0.1)
+                if self.should_stop:
+                    break
             else:
                 break
 

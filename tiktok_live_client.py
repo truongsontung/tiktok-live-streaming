@@ -14,7 +14,8 @@ from collections import deque
 
 try:
     from TikTokLive import TikTokLiveClient
-    from TikTokLive.events import CommentEvent, GiftEvent, FollowEvent, LikeEvent, ViewerCountEvent
+    from TikTokLive.events.custom_events import FollowEvent
+    from TikTokLive.events.proto_events import CommentEvent, GiftEvent, LikeEvent, RoomUserSeqEvent
     TIKTOK_LIVE_AVAILABLE = True
 except ImportError:
     TIKTOK_LIVE_AVAILABLE = False
@@ -39,6 +40,8 @@ class TikTokLiveClientManager:
         self.is_connected: bool = False
         self.is_connecting: bool = False
         self.last_error: str = ""
+        self.web_proxy: Optional[str] = None
+        self.ws_proxy: Optional[str] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._stop_event: Optional[threading.Event] = None
@@ -68,14 +71,25 @@ class TikTokLiveClientManager:
         """Check if TikTokLive library is installed."""
         return TIKTOK_LIVE_AVAILABLE
 
-    def configure(self, username: str):
+    def configure(self, username: str, web_proxy: str = None, ws_proxy: str = None):
         """Configure the client with a TikTok username/handle."""
         with self._lock:
+            username = username.strip().lstrip("@")
             self.username = username
-            if self.client:
-                self.client = TikTokLiveClient(username_or_id_or_url=f"@{username}")
-            else:
-                self.client = TikTokLiveClient(username_or_id_or_url=f"@{username}")
+            self.web_proxy = web_proxy
+            self.ws_proxy = ws_proxy
+            try:
+                kwargs = {}
+                if web_proxy:
+                    kwargs["web_proxy"] = web_proxy
+                if ws_proxy:
+                    kwargs["ws_proxy"] = ws_proxy
+                self.client = TikTokLiveClient(unique_id=username, **kwargs)
+            except Exception as e:
+                self.last_error = f"TikTokLiveClient init failed: {e}"
+                logger.error(self.last_error)
+                self.client = None
+                return
             self._register_event_handlers()
 
     def _register_event_handlers(self):
@@ -83,7 +97,7 @@ class TikTokLiveClientManager:
         if not self.client or not TIKTOK_LIVE_AVAILABLE:
             return
 
-        @self.client.on("comment")
+        @self.client.on(CommentEvent)
         async def on_comment(cmd):
             ts = datetime.now().strftime("%H:%M:%S")
             comment_data = {
@@ -106,7 +120,31 @@ class TikTokLiveClientManager:
                 except Exception as e:
                     logger.error(f"Error in comment callback: {e}")
 
-        @self.client.on("gift")
+    def inject_comment(self, username: str, comment: str, trigger_ai: bool = True):
+        """Inject an external comment (e.g. from proxy-forwarder) as if received live."""
+        if not username or not comment:
+            return False
+        comment_data = {
+            "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "user": username,
+            "comment": comment,
+            "profile_pic": None,
+            "is_verified": False,
+            "timestamp_unix": time.time()
+        }
+        with self._lock:
+            self.comments.append(comment_data)
+            self.total_comments += 1
+            current_count = self.total_comments
+        if trigger_ai:
+            for cb in self.on_comment_callbacks:
+                try:
+                    cb(comment_data, current_count)
+                except Exception as e:
+                    logger.error(f"Error in comment callback: {e}")
+        return True
+
+        @self.client.on(GiftEvent)
         async def on_gift(cmd):
             gift_data = {
                 "timestamp": datetime.now().strftime("%H:%M:%S"),
@@ -126,7 +164,7 @@ class TikTokLiveClientManager:
                 except Exception as e:
                     logger.error(f"Error in gift callback: {e}")
 
-        @self.client.on("follow")
+        @self.client.on(FollowEvent)
         async def on_follow(cmd):
             follow_data = {
                 "timestamp": datetime.now().strftime("%H:%M:%S"),
@@ -138,7 +176,7 @@ class TikTokLiveClientManager:
                 self.total_follows += 1
             logger.info(f"New follow from: {cmd.follow_user.nickname}")
 
-        @self.client.on("like")
+        @self.client.on(LikeEvent)
         async def on_like(cmd):
             like_data = {
                 "timestamp": datetime.now().strftime("%H:%M:%S"),
@@ -150,12 +188,14 @@ class TikTokLiveClientManager:
                 self.likes.append(like_data)
             logger.info(f"Like from: {cmd.like_user.nickname}")
 
-        @self.client.on("viewer_count")
+        @self.client.on(RoomUserSeqEvent)
         async def on_viewer_count(cmd):
             with self._lock:
-                self.viewer_count = cmd.viewer_count
-                if self.peak_viewers < cmd.viewer_count:
-                    self.peak_viewers = cmd.viewer_count
+                vc = getattr(cmd, 'viewer_count', None) or getattr(cmd, 'user_count', None)
+                if vc is not None:
+                    self.viewer_count = vc
+                    if self.peak_viewers < vc:
+                        self.peak_viewers = vc
 
     def connect_async(self):
         """Start the async event loop in a background thread."""

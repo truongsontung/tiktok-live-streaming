@@ -1,4 +1,31 @@
 document.addEventListener('DOMContentLoaded', () => {
+    let API_KEY = '';
+
+    // Fetch api_key_secret for protected endpoints (via dashboard auth session)
+    fetch('api/config').then(r => r.json()).then(cfg => {
+        API_KEY = cfg.api_key_secret || '';
+    }).catch(() => {});
+
+    // Intercept fetch: auto attach X-API-Key for protected POST endpoints
+        const _origFetch = window.fetch;
+    window.fetch = async (input, init = {}) => {
+        let url = typeof input === 'string' ? input : (input && input.url ? input.url : '');
+        url = url.startsWith('/') ? url : '/' + url;
+        const protectedPaths = ['/api/ai/configure', '/api/stream/start', '/api/stream/stop',
+            '/api/live/connect', '/api/live/disconnect', '/api/live/reconnect',
+            '/api/live/comment-forward', '/api/media/playlist', '/api/overlay/comment',
+            '/api/overlay/configure', '/api/convert'];
+        const isProtected = protectedPaths.some(p => url.includes(p));
+        if (isProtected) {
+            if (!API_KEY) {
+                await fetch('api/config').then(r => r.json()).then(cfg => { API_KEY = cfg.api_key_secret || ''; }).catch(()=>{});
+            }
+            if (API_KEY) {
+                init.headers = { ...(init.headers || {}), 'X-API-Key': API_KEY };
+            }
+        }
+        return _origFetch(input, init);
+    };
     // Navigation Tabs (Desktop & Mobile)
     const navItems = document.querySelectorAll('.nav-item, .mobile-nav-item');
     const tabPages = document.querySelectorAll('.tab-page');
@@ -522,13 +549,29 @@ document.addEventListener('DOMContentLoaded', () => {
     // AI Config Form
     const aiConfigForm = document.getElementById('aiConfigForm');
     if (aiConfigForm) {
+        const presetEl = document.getElementById('aiModelPreset');
+        const customWrap = document.getElementById('aiModelCustomWrap');
+        if (presetEl) {
+            presetEl.addEventListener('change', () => {
+                if (presetEl.value === 'custom') {
+                    customWrap.style.display = 'block';
+                } else {
+                    customWrap.style.display = 'none';
+                }
+            });
+        }
         aiConfigForm.addEventListener('submit', async (e) => {
             e.preventDefault();
+            const preset = document.getElementById('aiModelPreset').value;
+            let model = document.getElementById('aiModel').value;
+            if (preset !== 'custom') model = preset;
             const payload = {
                 enabled: document.getElementById('aiEnabled').checked,
                 api_key: document.getElementById('aiApiKey').value,
-                model: document.getElementById('aiModel').value,
-                persona: document.getElementById('aiPersona').value
+                model: model,
+                base_url: document.getElementById('aiBaseUrl').value.trim() || null,
+                persona: document.getElementById('aiPersona').value,
+                custom_system_prompt: document.getElementById('aiCustomPrompt').value.trim() || null
             };
 
             try {
@@ -552,8 +595,24 @@ document.addEventListener('DOMContentLoaded', () => {
             const res = await fetch('api/ai/status');
             const data = await res.json();
             document.getElementById('aiEnabled').checked = data.enabled;
-            document.getElementById('aiModel').value = data.model;
-            // Note: API key is not returned for security
+            document.getElementById('aiBaseUrl').value = data.base_url || '';
+            const presetEl = document.getElementById('aiModelPreset');
+            const customWrap = document.getElementById('aiModelCustomWrap');
+            const knownPresets = ['gpt-4o-mini', 'gpt-4o', 'gpt-3.5-turbo'];
+            if (data.model && knownPresets.includes(data.model)) {
+                presetEl.value = data.model;
+                customWrap.style.display = 'none';
+            } else {
+                presetEl.value = 'custom';
+                customWrap.style.display = 'block';
+                document.getElementById('aiModel').value = data.model;
+            }
+            if (document.getElementById('aiCustomPrompt')) {
+                document.getElementById('aiCustomPrompt').value = data.custom_system_prompt || '';
+            }
+            if (document.getElementById('aiPersona')) {
+                document.getElementById('aiPersona').value = data.persona || 'assistant';
+            }
         } catch (err) {
             console.error('Failed to load AI config:', err);
         }
@@ -615,7 +674,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 const res = await fetch('api/live/connect', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username: username })
+                     body: JSON.stringify({
+                         username: username,
+                         web_proxy: document.getElementById('liveWebProxy') ? document.getElementById('liveWebProxy').value.trim() || null : null
+                     })
                 });
                 const data = await res.json();
                 showToast(data.message || 'Kết nối live thành công!', data.success ? 'emerald' : 'rose');

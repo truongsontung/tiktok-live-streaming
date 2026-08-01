@@ -33,6 +33,11 @@ class AIResponseEngine:
     DEFAULT_TEMPERATURE = 0.7
     DEFAULT_MAX_TOKENS = 150
 
+    LIVE_CONTEXT_PROMPT = """Bạn đang tham gia vào một buổi Live Stream TikTok. Người dùng sẽ gửi bình luận và bạn cần trả lời ngắn gọn, tự nhiên, tạo sự tương tác.
+- Luôn nhớ bạn đang trong môi trường live stream, trò chuyện tức thời với người xem
+- Trả lời dưới 250 ký tự, ngắn gọn và dễ đọc
+- Khuyến khích người xem tiếp tục tương tác bằng cách đặt câu hỏi"""
+
     PERSONAS = {
         "coder": {
             "name": "coder",
@@ -83,7 +88,9 @@ class AIResponseEngine:
         self.client: Optional[OpenAI] = None
         self.api_key: Optional[str] = None
         self.model: str = "gpt-4o-mini"
+        self.base_url: str = None
         self.persona: str = "assistant"
+        self.custom_system_prompt: str = None
         self.enabled: bool = False
         self.last_response_time: float = 0
         self.response_cooldown: float = 2.0  # Minimum seconds between responses
@@ -106,19 +113,26 @@ class AIResponseEngine:
         """Check if OpenAI library is installed."""
         return OPENAI_AVAILABLE
 
-    def configure(self, api_key: str, model: str = None, persona: str = "assistant"):
+    def configure(self, api_key: str, model: str = None, persona: str = "assistant", base_url: str = None, custom_system_prompt: str = None):
         """Configure the AI engine with API key and settings."""
         self.api_key = api_key
         if model:
             self.model = model
         if persona:
             self.persona = persona
+        if base_url:
+            self.base_url = base_url
+        if custom_system_prompt is not None:
+            self.custom_system_prompt = custom_system_prompt or None
         
         if OPENAI_AVAILABLE and api_key:
             try:
-                self.client = OpenAI(api_key=api_key)
+                if base_url:
+                    self.client = OpenAI(api_key=api_key, base_url=base_url)
+                else:
+                    self.client = OpenAI(api_key=api_key)
                 self.enabled = True
-                logger.info(f"AI Engine configured with model: {self.model}, persona: {self.persona}")
+                logger.info(f"AI Engine configured with model: {self.model}, persona: {self.persona}" + (f", base_url: {base_url}" if base_url else ""))
             except Exception as e:
                 logger.error(f"Failed to initialize OpenAI client: {e}")
                 self.enabled = False
@@ -139,13 +153,21 @@ class AIResponseEngine:
 
     def set_enabled(self, enabled: bool):
         """Enable or disable the AI engine."""
-        with self.__lock:
+        with self._lock:
             self.enabled = enabled and self.client is not None
         logger.info(f"AI Engine {'enabled' if self.enabled else 'disabled'}")
 
     def _get_persona_config(self) -> Dict[str, Any]:
         """Get the current persona configuration."""
         return self.PERSONAS.get(self.persona, self.PERSONAS["assistant"])
+
+    def _build_system_prompt(self) -> str:
+        """Build the system prompt combining live context + persona + custom."""
+        persona_config = self._get_persona_config()
+        parts = [self.LIVE_CONTEXT_PROMPT, persona_config["system_prompt"]]
+        if self.custom_system_prompt:
+            parts.append(self.custom_system_prompt)
+        return "\n\n---\n\n".join(parts)
 
     def generate_response(self, comment: str, username: str = " Viewer", context: Optional[List[Dict]] = None) -> Optional[str]:
         """
@@ -162,11 +184,9 @@ class AIResponseEngine:
         with self._lock:
             self.last_response_time = current_time
 
-        persona_config = self._get_persona_config()
-        
         # Build conversation context
         messages = [
-            {"role": "system", "content": persona_config["system_prompt"]},
+            {"role": "system", "content": self._build_system_prompt()},
         ]
         
         # Add recent history
@@ -275,7 +295,9 @@ class AIResponseEngine:
                 "available": self.is_available(),
                 "api_key_configured": bool(self.api_key),
                 "model": self.model,
+                "base_url": self.base_url,
                 "persona": self.persona,
+                "custom_system_prompt": self.custom_system_prompt,
                 "total_responses": self.total_responses,
                 "available_personas": list(self.PERSONAS.keys()),
                 "response_cooldown_seconds": self.response_cooldown,

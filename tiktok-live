@@ -42,10 +42,16 @@ case "$1" in
         echo "[TikTok Live] Connecting to live room: @$USERNAME ..."
         $VENV_PYTHON -c "from tiktok_live_client import live_client; live_client.configure('$USERNAME'); print('Connected' if live_client.connect_async() else 'Failed: ' + live_client.last_error)"
         ;;
-    ai-test)
+     ai-test)
         COMMENT="${2:-hello}"
         echo "[TikTok Live] Testing AI response to: $COMMENT ..."
         $VENV_PYTHON -c "from ai_engine import ai_engine; print(ai_engine.generate_response('$COMMENT', 'TestUser') or 'AI not configured')"
+        ;;
+    forward)
+        USERNAME="${2:-songoku_superboy}"
+        if [ -z "$USERNAME" ]; then echo "Usage: ./tiktok-live forward <username>"; exit 1; fi
+        echo "[TikTok Live] Starting external comment forwarder for @$USERNAME ..."
+        cd "$BASE_DIR" && USERNAME="$USERNAME" PYTHONUNBUFFERED=1 $VENV_PYTHON comment_forwarder.py
         ;;
     ai-persona)
         PERSONA="${2:-assistant}"
@@ -88,6 +94,7 @@ case "$1" in
         echo "  connect [user]    : Connect to TikTok live room by username"
         echo "  ai-test [comment] : Test AI response to a comment"
         echo "  ai-persona [name] : Set AI persona (coder/salesperson/assistant)"
+        echo "  forward [user]     : Start external comment forwarder (clean IP/proxy)"
         echo "  server-start       : Start web dashboard server"
         echo "  server-stop        : Stop web dashboard server"
         echo "  login              : Open browser for interactive TikTok login"

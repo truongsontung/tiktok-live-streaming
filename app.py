@@ -12,9 +12,9 @@ import urllib.request
 import urllib.error
 import psutil
 import logging
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, FileResponse, Response
+from fastapi.responses import HTMLResponse, FileResponse, Response, JSONResponse
 from pydantic import BaseModel
 from typing import Optional
 
@@ -32,6 +32,42 @@ logging.basicConfig(
 logger = logging.getLogger("TikTokLiveApp")
 
 app = FastAPI(title="TikTok Live Control Center")
+
+def _get_api_secret() -> str:
+    """Load secret from config.json (or env override)."""
+    secret = os.environ.get("API_KEY_SECRET")
+    if secret:
+        return secret
+    try:
+        return engine.load_config().get("api_key_secret") or ""
+    except Exception:
+        return ""
+
+@app.middleware("http")
+async def api_auth_middleware(request: Request, call_next):
+    path = request.url.path
+    # Cho phép truy cập static + root + nginx health
+    if (
+        path == "/" or
+        path.startswith("/static") or
+        path.startswith("/api/stream-output")
+    ):
+        return await call_next(request)
+    if path.startswith("/api/"):
+        # Whitelist read-only endpoints (public; protected by nginx basic_auth from internet)
+        if path in ("/api/status", "/api/stream-output", "/api/preview.jpg", "/api/config"):
+            return await call_next(request)
+        # Enforce X-API-Key only on WRITE methods (POST/PUT/DELETE/PATCH)
+        if request.method in ("POST", "PUT", "DELETE", "PATCH"):
+            expected = _get_api_secret()
+            if expected:
+                provided = request.headers.get("X-API-Key")
+                if provided != expected:
+                    return JSONResponse(
+                        {"detail": "Unauthorized: valid X-API-Key required"},
+                        status_code=403,
+                    )
+    return await call_next(request)
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 os.makedirs(STATIC_DIR, exist_ok=True)
@@ -59,12 +95,16 @@ class TikTokSessionModel(BaseModel):
 
 class TikTokUserModel(BaseModel):
     username: str
+    web_proxy: Optional[str] = None
+    ws_proxy: Optional[str] = None
 
 class AIConfigModel(BaseModel):
     enabled: bool
     api_key: str
     model: Optional[str] = "gpt-4o-mini"
     persona: Optional[str] = "assistant"
+    base_url: Optional[str] = None
+    custom_system_prompt: Optional[str] = None
 
 class LiveConfigModel(BaseModel):
     username: str
@@ -361,7 +401,7 @@ async def upload_media(file: UploadFile = File(...)):
                 raise HTTPException(status_code=413, detail="File quá lớn (max 600MB). Nén video hoặc cắt ngắn.")
             buffer.write(chunk)
 
-    # Response immediately after file saved — convert runs fully async (non-blocking)
+    # Response immediately after file saved - convert runs fully async (non-blocking)
     import threading as _threading
 
     def _bg_convert():
@@ -589,7 +629,7 @@ def get_ai_status():
 @app.post("/api/ai/configure")
 def configure_ai(config: AIConfigModel):
     """Configure AI engine with API key and settings."""
-    ai_engine.configure(config.api_key, config.model, config.persona)
+    ai_engine.configure(config.api_key, config.model, config.persona, config.base_url, config.custom_system_prompt)
     ai_engine.set_enabled(config.enabled)
     
     # Save to config file
@@ -599,6 +639,8 @@ def configure_ai(config: AIConfigModel):
         "api_key": config.api_key,
         "model": config.model,
         "persona": config.persona,
+        "base_url": config.base_url,
+        "custom_system_prompt": config.custom_system_prompt,
         "enabled": config.enabled
     }
     with open(CONFIG_FILE, "w") as f:
@@ -656,11 +698,13 @@ def connect_live_client(req: TikTokUserModel):
     username = req.username.strip()
     if not username:
         raise HTTPException(status_code=400, detail="Username is required")
-    
-    live_client.configure(username)
-    
-    # Save to config
+
     current_cfg = engine.load_config()
+    live_client.configure(username, req.web_proxy, req.ws_proxy)
+    if not live_client.client:
+        raise HTTPException(status_code=500, detail=live_client.last_error or "TikTokLive client init failed")
+
+    # Save to config (already loaded above)
     current_cfg["tiktok_username"] = username
     with open(CONFIG_FILE, "w") as f:
         json.dump(current_cfg, f, indent=2)
@@ -691,6 +735,63 @@ def reconnect_live_client():
 def get_live_comments(count: int = 20):
     """Get recent comments from TikTok live."""
     return {"comments": live_client.get_recent_comments(count)}
+
+class ForwardCommentModel(BaseModel):
+    username: str
+    comment: str
+
+@app.get("/api/live/session-info")
+def live_session_info():
+    """
+    Trả thông tin live session để comment_forwarder.py kết nối từ bất kỳ máy nào
+    (máy local / freeyou.win / VPS) mà không cần cấu hình username thủ công.
+    """
+    cfg = engine.load_config()
+    return {
+        "username": (cfg.get("tiktok_username") or "").strip().lstrip("@"),
+        "server_url": None,  # forwarder tự biết server URL qua env SERVER_URL
+        "tiktok_session": cfg.get("tiktok_session", ""),
+        "live_client_connected": live_client.is_connected,
+    }
+
+@app.get("/api/config")
+def get_public_config():
+    """
+    Trả cấu hình cần thiết cho frontend (auth bởi nginx basic_auth).
+    Bao gồm api_key_secret để frontend gửi header X-API-Key cho các endpoint nhạy.
+    Chỉ truy cập qua nginx proxy (port 8888 localhost không public).
+    """
+    cfg = engine.load_config()
+    return {
+        "api_key_secret": cfg.get("api_key_secret", ""),
+        "tiktok_username": cfg.get("tiktok_username", ""),
+        "ai_enabled": bool(cfg.get("ai_enabled", False)),
+    }
+
+@app.post("/api/live/comment-forward")
+def forward_comment(req: ForwardCommentModel):
+    """
+    Receive a comment forwarded by an external listener (comment_forwarder.py)
+    on a clean IP / via proxy. Server ADDS user comment to overlay scroll,
+    then generates an AI response and RETURNS it to the forwarder - which will
+    post the reply onto TikTok's comment panel (NOT rendered onto video).
+    """
+    if not live_client.is_available():
+        raise HTTPException(status_code=500, detail="TikTokLive library not available on server")
+    # Add user comment to overlay scroll (visual), telemetry, but do NOT trigger inline AI render
+    overlay_renderer.add_comment(req.username, req.comment, is_ai_response=False)
+    live_client.inject_comment(req.username, req.comment, trigger_ai=False)
+
+    # Generate AI response - returned to forwarder so it can reply on TikTok comment panel
+    ai_response = ""
+    if ai_engine.is_available() and ai_engine.enabled:
+        ai_response = ai_engine.generate_response(req.comment, req.username) or ""
+
+    return {
+        "success": True,
+        "message": f"Comment forwarded by @{req.username}",
+        "ai_response": ai_response,
+    }
 
 @app.get("/api/live/gifts")
 def get_live_gifts(count: int = 10):
@@ -747,4 +848,17 @@ def configure_overlays(enabled: bool, comment_scroll: bool = True, ai_response: 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8888)
+    # Auto-load AI config from config.json on startup
+    try:
+        _startup_cfg = engine.load_config()
+        _ai = _startup_cfg.get("ai_config", {})
+        if _ai.get("enabled") and _ai.get("api_key"):
+            ai_engine.configure(
+                _ai["api_key"], _ai.get("model"), _ai.get("persona"),
+                _ai.get("base_url"), _ai.get("custom_system_prompt")
+            )
+            ai_engine.set_enabled(True)
+            print("AI engine auto-configured from config.json.", flush=True)
+    except Exception as e:
+        print(f"Startup AI config load failed: {e}", flush=True)
+    uvicorn.run(app, host="127.0.0.1", port=8888)
