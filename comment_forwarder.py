@@ -180,6 +180,24 @@ def start_listener():
     logger.info(f"Connecting to live room: @{username} (proxy: {WEB_PROXY or 'none'})")
     try:
         client = TikTokLiveClient(unique_id=username, **kwargs)
+        # Configure session cookie tu server -> de send_room_chat reply duoc xac thuc
+        try:
+            _sc, _si = _fetch_json(f"{SERVER_URL}/api/live/session-info")
+            _sid = ((_si or {}).get("tiktok_session") or "").strip()
+            if _sid:
+                # Xoa tt-target-idc conflict trong httpx jar (root cause "Multiple cookies exist")
+                try:
+                    _jar = getattr(client.web.cookies, "jar", None) or client.web.cookies
+                    if hasattr(_jar, "remove"):
+                        for _c in list(_jar):
+                            if getattr(_c, "name", "") == "tt-target-idc":
+                                _jar.remove(_c)
+                except Exception:
+                    pass
+                client.web.set_session(_sid, None)
+                logger.info("Session cookie configured (send_room_chat reply auth)")
+        except Exception as e:
+            logger.warning(f"set_session failed (reply co the loi): {e}")
     except Exception as e:
         logger.error(f"TikTokLiveClient init failed: {e}")
         sys.exit(1)
