@@ -128,6 +128,28 @@ class StreamEngine:
         except:
             return None
 
+    def _get_audio_codec(self, video_path):
+        """Return audio stream count; None/empty if no audio."""
+        try:
+            result = subprocess.run(
+                ["ffprobe", "-v", "quiet", "-select_streams", "a:0", "-show_entries", "stream=codec_name", "-of", "csv=p=0", video_path],
+                capture_output=True, text=True, timeout=10
+            )
+            out = result.stdout.strip()
+            return out if out else None
+        except:
+            return None
+
+    def _ensure_audio(self, video_path, output_path):
+        """Add silent audio track to a video if it has none (for concat compatibility)."""
+        if not os.path.exists(output_path):
+            subprocess.run([
+                "ffmpeg", "-y", "-i", video_path,
+                "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+                "-shortest", output_path
+            ], capture_output=True, timeout=300)
+
     def _convert_to_h264(self, input_path, output_path, resolution):
         w, h = resolution.split("x")
         cmd = [
@@ -354,11 +376,24 @@ class StreamEngine:
                     compatible_playlist.append(video_path)
 
         playlist_txt = os.path.join(LOGS_DIR, "playlist.txt")
-        if compatible_playlist:
+        # Ensure every video has an audio track (concat demuxer needs audio on all inputs)
+        final_playlist = []
+        for video_path in compatible_playlist:
+            if self._get_audio_codec(video_path):
+                final_playlist.append(video_path)
+            else:
+                # No audio → create silent-audio copy in logs dir
+                audio_path = os.path.join(LOGS_DIR, "audioadded_" + os.path.basename(video_path))
+                if not os.path.exists(audio_path):
+                    logger.info(f"Adding silent audio to: {os.path.basename(video_path)}")
+                    self._ensure_audio(video_path, audio_path)
+                final_playlist.append(audio_path if os.path.exists(audio_path) else video_path)
+
+        if final_playlist:
             with open(playlist_txt, "w") as f:
-                for video_path in compatible_playlist:
+                for video_path in final_playlist:
                     f.write(f"file '{video_path}'\n")
-        return compatible_playlist
+        return final_playlist
 
     def _start_preview(self, config):
         """Start a lightweight FFmpeg process for dashboard preview."""
@@ -442,7 +477,13 @@ class StreamEngine:
                     os.remove(temp_file)
                 except:
                     pass
-            self._temp_files = []
+        # Clean up audioadded + converted temp files
+        for tmp in glob.glob(os.path.join(LOGS_DIR, "audioadded_*")) + glob.glob(os.path.join(LOGS_DIR, "converted_*")):
+            try:
+                os.remove(tmp)
+            except:
+                pass
+        self._temp_files = []
 
         # Disconnect live client
         live_client.disconnect()
@@ -490,7 +531,7 @@ class StreamEngine:
         while not self.should_stop:
             config = self.load_config()
 
-            # Auto-fetch fresh key on every reconnect cycle (keys are single-use)
+            # Auto-fetch stream key (keys are single-use, refresh on reconnect)
             tiktok_session = config.get("tiktok_session", "").strip()
             if tiktok_session and scraper and scraper.available:
                 try:
@@ -504,6 +545,12 @@ class StreamEngine:
                         logger.info("Fresh stream key fetched and saved!")
                 except Exception as e:
                     logger.warning(f"Auto-fetch key failed: {e}")
+
+            # Rebuild fresh playlist + audioadded files on each reconnect
+            self._temp_files = []
+            for tmp in glob.glob(os.path.join(LOGS_DIR, "audioadded_*")) + glob.glob(os.path.join(LOGS_DIR, "converted_*")):
+                try: os.remove(tmp)
+                except: pass
 
             try:
                 cmd = self.build_ffmpeg_command(config)
