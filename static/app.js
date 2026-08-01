@@ -11,12 +11,10 @@ document.addEventListener('DOMContentLoaded', () => {
     window.fetch = async (input, init = {}) => {
         let url = typeof input === 'string' ? input : (input && input.url ? input.url : '');
         url = url.startsWith('/') ? url : '/' + url;
-        const protectedPaths = ['/api/ai/configure', '/api/stream/start', '/api/stream/stop',
-            '/api/live/connect', '/api/live/disconnect', '/api/live/reconnect',
-            '/api/live/comment-forward', '/api/media/playlist', '/api/overlay/comment',
-            '/api/overlay/configure', '/api/convert'];
-        const isProtected = protectedPaths.some(p => url.includes(p));
-        if (isProtected) {
+        const method = (init && init.method) || 'GET';
+        // Enforce X-API-Key cho moi non-GET request (POST/PUT/DELETE/PATCH), truoc GET/HEAD/OPTIONS
+        const needsKey = !['GET', 'HEAD', 'OPTIONS'].includes(method.toUpperCase());
+        if (needsKey) {
             if (!API_KEY) {
                 await fetch('api/config').then(r => r.json()).then(cfg => { API_KEY = cfg.api_key_secret || ''; }).catch(()=>{});
             }
@@ -457,9 +455,11 @@ document.addEventListener('DOMContentLoaded', () => {
     window.deleteMedia = async function(fname) {
         if (!confirm(`Bạn có chắc muốn xóa video ${fname}?`)) return;
         try {
-            await fetch(`api/media/${encodeURIComponent(fname)}`, { method: 'DELETE' });
+            const res = await fetch(`api/media/${encodeURIComponent(fname)}`, { method: 'DELETE' });
+            if (!res.ok) throw new Error(`Xóa thất bại (HTTP ${res.status})`);
+            await res.json();
             showToast(`Đã xóa ${fname}`, 'emerald');
-            loadMediaList();
+            await loadMediaList();
         } catch (err) {
             showToast(err.message, 'rose');
         }
