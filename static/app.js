@@ -199,7 +199,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const formData = new FormData();
         formData.append('file', file);
 
-        showToast(`Đang tải lên ${file.name}...`, 'cyan');
+        let progressToast = showToast(`Đang tải lên ${file.name}... 0%`, 'cyan');
 
         const xhr = new XMLHttpRequest();
         xhr.open('POST', 'api/media/upload');
@@ -207,12 +207,13 @@ document.addEventListener('DOMContentLoaded', () => {
         xhr.upload.onprogress = (event) => {
             if (event.lengthComputable) {
                 const percent = Math.round((event.loaded / event.total) * 100);
-                showToast(`Tải lên ${file.name}: ${percent}%`, 'cyan');
+                progressToast = showToast(`Đang tải lên ${file.name}: ${percent}%`, 'cyan');
             }
         };
 
         xhr.onload = () => {
             fileUploadInput.value = '';
+            clearActiveToast();
             if (xhr.status === 200) {
                 const data = JSON.parse(xhr.responseText);
                 if (data.converted) {
@@ -221,16 +222,16 @@ document.addEventListener('DOMContentLoaded', () => {
                     showToast(`Tải lên ${file.name} thành công! Đang convert nền...`, 'emerald');
                 }
                 loadMediaList();
-                setTimeout(() => {
-                    loadMediaList();
-                    if (typeof loadPlaylist === 'function') loadPlaylist();
-                }, 3000);
+                setTimeout(() => { loadMediaList(); if (typeof loadPlaylist === 'function') loadPlaylist(); }, 5000);
+            } else if (xhr.status === 413) {
+                showToast(`File ${file.name} quá lớn (max 600MB)!`, 'rose');
             } else {
-                showToast(`Lỗi tải lên (${xhr.status})`, 'rose');
+                showToast(`Lỗi tải lên (${xhr.status}): ${xhr.responseText.slice(0,100)}`, 'rose');
             }
         };
 
         xhr.onerror = () => {
+            clearActiveToast();
             showToast(`Lỗi kết nối khi tải ${file.name}`, 'rose');
         };
 
@@ -672,13 +673,31 @@ document.addEventListener('DOMContentLoaded', () => {
         return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     }
 
+    let activeToast = null;
     function showToast(msg, type = 'emerald') {
         const container = document.getElementById('toastContainer');
+        if (activeToast && activeToast.parentNode) {
+            activeToast.textContent = msg;
+            activeToast.className = `toast toast-${type}`;
+            clearTimeout(activeToast._hideTimer);
+            activeToast._hideTimer = setTimeout(() => activeToast.remove(), 4000);
+            return activeToast;
+        }
         const toast = document.createElement('div');
         toast.className = `toast toast-${type}`;
         toast.textContent = msg;
         container.appendChild(toast);
-        setTimeout(() => toast.remove(), 4000);
+        toast._hideTimer = setTimeout(() => toast.remove(), 4000);
+        activeToast = toast;
+        return toast;
+    }
+
+    function clearActiveToast() {
+        if (activeToast) {
+            clearTimeout(activeToast._hideTimer);
+            activeToast.remove();
+            activeToast = null;
+        }
     }
 
     // Update Simulated Clock
