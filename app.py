@@ -778,8 +778,7 @@ def forward_comment(req: ForwardCommentModel):
     """
     if not live_client.is_available():
         raise HTTPException(status_code=500, detail="TikTokLive library not available on server")
-    # Add user comment to overlay scroll (visual), telemetry, but do NOT trigger inline AI render
-    overlay_renderer.add_comment(req.username, req.comment, is_ai_response=False)
+    # Chỉ telemetry (không render lên video) — forwarder reply lên comment panel.
     live_client.inject_comment(req.username, req.comment, trigger_ai=False)
 
     # Generate AI response - returned to forwarder so it can reply on TikTok comment panel
