@@ -4,6 +4,9 @@ TikTok Live WebSocket Client
 Connects to TikTok live rooms and listens for real-time events (comments, gifts, viewers).
 """
 
+import os
+os.environ.setdefault("WHITELIST_AUTHENTICATED_SESSION_ID_HOST", "api.eulerstream.com")
+
 import asyncio
 import json
 import time
@@ -42,6 +45,8 @@ class TikTokLiveClientManager:
         self.last_error: str = ""
         self.web_proxy: Optional[str] = None
         self.ws_proxy: Optional[str] = None
+        self._session_id: Optional[str] = None
+        self._tt_target_idc: Optional[str] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._stop_event: Optional[threading.Event] = None
@@ -72,13 +77,16 @@ class TikTokLiveClientManager:
         """Check if TikTokLive library is installed."""
         return TIKTOK_LIVE_AVAILABLE
 
-    def configure(self, username: str, web_proxy: str = None, ws_proxy: str = None):
-        """Configure the client with a TikTok username/handle."""
+    def configure(self, username: str, web_proxy: str = None, ws_proxy: str = None,
+                  session_id: str = None, tt_target_idc: str = None):
+        """Configure the client with a TikTok username/handle and optional session."""
         with self._lock:
             username = username.strip().lstrip("@")
             self.username = username
             self.web_proxy = web_proxy
             self.ws_proxy = ws_proxy
+            self._session_id = session_id
+            self._tt_target_idc = tt_target_idc
             try:
                 kwargs = {}
                 if web_proxy:
@@ -92,6 +100,54 @@ class TikTokLiveClientManager:
                 self.client = None
                 return
             self._register_event_handlers()
+            if session_id:
+                self._apply_session(session_id, tt_target_idc)
+
+    def _apply_session(self, session_id: str, tt_target_idc: str = None):
+        """Apply TikTok session credentials to the underlying client for authed API calls.
+        Clears duplicate tt-target-idc cookies to avoid 'Multiple cookies' error.
+        NOTE: Called AFTER WebSocket connection is established (not during connect)."""
+        try:
+            _jar = getattr(self.client.web.cookies, "jar", None)
+            if _jar is not None:
+                for _c in list(_jar):
+                    if getattr(_c, "name", "") == "tt-target-idc":
+                        try:
+                            _jar.clear(_c.domain, _c.path, _c.name)
+                        except Exception:
+                            pass
+
+            # Set session cookies WITHOUT tt-target-idc first (avoids dup with TikTok responses)
+            self.client.web.cookies.set("sessionid", session_id or "", ".tiktok.com")
+            self.client.web.cookies.set("sessionid_ss", session_id or "", ".tiktok.com")
+            self.client.web.cookies.set("sid_tt", session_id or "", ".tiktok.com")
+
+            # Set a single canonical tt-target-idc cookie
+            if tt_target_idc:
+                if _jar is not None:
+                    for _c in list(_jar):
+                        if getattr(_c, "name", "") == "tt-target-idc":
+                            try:
+                                _jar.clear(_c.domain, _c.path, _c.name)
+                            except Exception:
+                                pass
+                import http.cookiejar as _cbj
+                _ck = _cbj.Cookie(
+                    version=0, name="tt-target-idc", value=tt_target_idc,
+                    port=None, port_specified=False,
+                    domain=".tiktok.com", domain_specified=True, domain_initial_dot=True,
+                    path="/", path_specified=True,
+                    secure=True, expires=None,
+                    discard=False, comment=None, comment_url=None,
+                    rest={}, rfc2109=False,
+                )
+                if _jar is not None:
+                    _jar.set_cookie(_ck)
+
+            self.client.web.params['user_is_login'] = "true" if session_id else "false"
+            logger.info(f"Session credentials applied (sid={session_id[:16]}..., tt_idc={tt_target_idc or 'none'})")
+        except Exception as e:
+            logger.warning(f"set_session failed: {e}")
 
     def _register_event_handlers(self):
         """Register handlers for TikTok live events."""

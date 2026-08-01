@@ -358,17 +358,22 @@ class StreamEngine:
                 "viewer_count": True,
             })
 
-        # Configure live client if tiktok username is provided
+        # Configure live client with TikTok credentials (integrated from comment_forwarder)
         tiktok_username = config.get("tiktok_username", "")
+        tiktok_session = config.get("tiktok_session", "").strip()
+        tt_target_idc = config.get("tiktok_tt_target_idc", "").strip()
         if tiktok_username and live_client.is_available():
             live_client.configure(
                 tiktok_username,
                 web_proxy=config.get("tiktok_web_proxy"),
-                ws_proxy=config.get("tiktok_ws_proxy")
+                ws_proxy=config.get("tiktok_ws_proxy"),
             )
             connected = live_client.connect_async()
             if connected:
                 logger.info(f"Connected to TikTok live room for: @{tiktok_username}")
+                # Apply session credentials for authenticated API calls (optional)
+                if tiktok_session:
+                    live_client._apply_session(tiktok_session, tt_target_idc or None)
             else:
                 logger.warning("Failed to connect to TikTok live room, streaming without live interaction")
 

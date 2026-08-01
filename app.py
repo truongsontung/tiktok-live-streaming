@@ -844,16 +844,15 @@ def get_public_config():
 def forward_comment(req: ForwardCommentModel):
     """
     Receive a comment forwarded by an external listener (comment_forwarder.py)
-    on a clean IP / via proxy. Server ADDS user comment to overlay scroll,
-    then generates an AI response and RETURNS it to the forwarder - which will
-    post the reply onto TikTok's comment panel (NOT rendered onto video).
+    on a clean IP / via proxy. Server ADDS user comment to overlay scroll +
+    generates AI response rendered as overlay text on the video stream.
     """
     if not live_client.is_available():
         raise HTTPException(status_code=500, detail="TikTokLive library not available on server")
-    # Chỉ telemetry (không render lên video) — forwarder reply lên comment panel.
-    live_client.inject_comment(req.username, req.comment, trigger_ai=False)
+    # Inject comment → triggers _handle_live_comment callback → overlay + AI rendering
+    live_client.inject_comment(req.username, req.comment, trigger_ai=True)
 
-    # Generate AI response - returned to forwarder so it can reply on TikTok comment panel
+    # Also generate AI response for the forwarder (if it needs to send to TikTok as reply)
     ai_response = ""
     if ai_engine.is_available() and ai_engine.enabled:
         ai_response = ai_engine.generate_response(req.comment, req.username, product_tag=req.product_tag) or ""

@@ -328,38 +328,56 @@ class OverlayRenderer:
     def get_ffmpeg_drawtext_args(self, config: Dict[str, Any]) -> List[str]:
         """
         Generate FFmpeg drawtext arguments for the overlay.
-        Returns a list of filter arguments.
+        Returns a list of filter arguments with colorful styling and
+        a 'jump to beat' y-position animation on welcome + AI messages.
         """
         args = []
         
-        # Base overlay text (can be static or dynamic from file)
+        # Base overlay text (static title bar)
         if config.get("overlay_text"):
             text = config["overlay_text"].replace(":", "\\:").replace("'", "\\'")
-            args.append(f"drawtext=text='{text}':x=(w-tw)/2:y=30:fontsize=36:fontcolor=white:box=1:boxcolor=black@0.6:boxborderw=10:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
+            args.append(f"drawtext=text='{text}':x=(w-tw)/2:y=30:fontsize=36:fontcolor=white@0.95:box=1:boxcolor=black@0.6:boxborderw=10:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
         
-        # Clock (dynamic from file)
+        # Clock (top-left, yellow)
         if self.enabled and config.get("show_clock", False):
-            args.append(f"drawtext=textfile={self.text_files['clock']}:x=(w-tw)/2:y=w/4:fontsize=36:fontcolor=yellow@0.9:box=1:boxcolor=black@0.5:boxborderw=8:reload=1:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
+            args.append(f"drawtext=textfile={self.text_files['clock']}:x=20:y=30:fontsize=36:fontcolor=yellow@0.9:box=1:boxcolor=black@0.5:boxborderw=8:reload=1:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
         
-        # Dynamic comment overlay (scroll from bottom)
+        # Dynamic comment overlay (bottom-left, scroll up)
         if self.enabled and self.enabled_overlays.get("comment_scroll", False):
-            args.append(f"drawtext=textfile={self.text_files['comment']}:x=20:y=h-th-120:fontsize=22:fontcolor=white@0.9:box=1:boxcolor=black@0.6:boxborderw=6:reload=1:line_spacing=8:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+            args.append(f"drawtext=textfile={self.text_files['comment']}:x=30:y=h-th-100:fontsize=24:fontcolor=white@0.92:box=1:boxcolor=black@0.5:boxborderw=6:line_spacing=10:reload=1:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
         
-        # AI response overlay (large centered, gradient effect via shadow)
+        # AI response overlay (center screen, cyan with shadow, jumps to beat)
         if self.enabled and self.enabled_overlays.get("ai_response", False):
-            args.append(f"drawtext=textfile={self.text_files['ai_response']}:x=(w-tw)/2:y=h/2-60:fontsize=32:fontcolor=cyan@0.95:box=1:boxcolor=black@0.6:boxborderw=10:reload=1:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
+            args.append(
+                f"drawtext=textfile={self.text_files['ai_response']}:"
+                f"x=(w-tw)/2:y=h/2-30+10*sin(n*0.15):fontsize=32:"
+                f"fontcolor=cyan@0.95:box=1:boxcolor=black@0.6:boxborderw=10:"
+                f"shadowcolor=white@0.7:shadowx=3:shadowy=3:"
+                f"reload=1:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+            )
         
-        # Welcome messages (center top, bouncing/fading)
+        # Welcome messages (center top, red box, bouncing to beat)
         if self.enabled and self.enabled_overlays.get("welcome", False):
-            args.append(f"drawtext=textfile={self.text_files['welcome']}:x=(w-tw)/2:y=130:fontsize=28:fontcolor=white@0.9:box=1:boxcolor=red@0.7:boxborderw=8:line_spacing=6:reload=1:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
+            args.append(
+                f"drawtext=textfile={self.text_files['welcome']}:"
+                f"x=(w-tw)/2:y=140+8*sin(n*0.12):fontsize=28:"
+                f"fontcolor=white@0.95:box=1:boxcolor=red@0.8:boxborderw=10:"
+                f"line_spacing=8:shadowcolor=white@0.6:shadowx=2:shadowy=2:"
+                f"reload=1:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+            )
         
-        # Stats panel
+        # Stats panel (top-right, small white)
         if self.enabled and self.enabled_overlays.get("stats_panel", False):
-            args.append(f"drawtext=textfile={self.text_files['stats']}:x=20:y=80:fontsize=18:fontcolor=white@0.85:box=1:boxcolor=black@0.5:boxborderw=6:reload=1:line_spacing=6:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+            args.append(f"drawtext=textfile={self.text_files['stats']}:x=w-tw-20:y=30:fontsize=18:fontcolor=white@0.85:box=1:boxcolor=black@0.5:boxborderw=6:line_spacing=6:reload=1:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
         
-        # Title overlay
+        # Title overlay (top-center)
         if self.enabled and self.current_overlay_text:
-            args.append(f"drawtext=textfile={self.text_files['title']}:x=(w-tw)/2:y=15:fontsize=28:fontcolor=white@0.95:box=1:boxcolor=royalblue@0.6:boxborderw=10:reload=1:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
+            args.append(
+                f"drawtext=textfile={self.text_files['title']}:"
+                f"x=(w-tw)/2:y=15:fontsize=28:fontcolor=white@0.95:"
+                f"box=1:boxcolor=blue@0.6:boxborderw=10:reload=1:"
+                f"fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+            )
         
         return args
 
