@@ -259,7 +259,7 @@ class StreamEngine:
         cmd.extend([
             "-vf", filter_str,
             "-c:v", "libx264",
-            "-preset", "veryfast",
+            "-preset", "superfast",
             "-tune", "zerolatency",
             "-g", str(fps),
             "-b:v", v_bitrate,
@@ -289,6 +289,11 @@ class StreamEngine:
             self._comment_stop_event.wait(timeout=1.0)
 
     def start_stream(self):
+        # Kill orphan ffmpeg RTMPS encode (leak from killed server -> double encode -> CPU full -> jitter)
+        try:
+            subprocess.run(["pkill", "-9", "-f", "rtmps://push-rtmp"], capture_output=True)
+        except Exception:
+            pass
         with self.lock:
             if self.is_running:
                 return False, "Stream is already running!"
@@ -409,6 +414,8 @@ class StreamEngine:
 
     def _start_preview(self, config):
         """Start a lightweight FFmpeg process for dashboard preview."""
+        # Kill old preview first -> prevent process leak (multiple preview FFmpgs ate CPU -> stutter)
+        self._stop_preview()
         # Ensure playlist.txt is fresh before starting preview
         self._write_playlist(config)
         try:
@@ -421,7 +428,11 @@ class StreamEngine:
             pw, ph = min(360, int(w)), min(640, int(h))
             
             filter_str = f"scale={pw}:{ph}:force_original_aspect_ratio=decrease,pad={pw}:{ph}:0:0:black,fps=2"
-            drawtext_args = overlay_renderer.get_ffmpeg_drawtext_args(config)
+            # Chỉ build drawtext nếu overlay thực sự bật (tránh preview render stats khi đã tắt overlay)
+            if overlay_renderer.enabled and config.get("overlay_enabled", True):
+                drawtext_args = overlay_renderer.get_ffmpeg_drawtext_args(config)
+            else:
+                drawtext_args = []
             if drawtext_args:
                 filter_str += "," + ",".join(drawtext_args)
             
@@ -450,6 +461,11 @@ class StreamEngine:
             except subprocess.TimeoutExpired:
                 self.preview_process.kill()
             self.preview_process = None
+        # Kill orphan preview FFmpeg (leak from crashed/older runs -> CPU full -> stream jitter)
+        try:
+            subprocess.run(["pkill", "-f", "scale=360:640"], capture_output=True)
+        except Exception:
+            pass
 
     def stop_stream(self):
         with self.lock:
