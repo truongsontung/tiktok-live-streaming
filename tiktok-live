@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# TikTok Live Automation CLI Executable
+
+BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_PYTHON="$BASE_DIR/venv/bin/python3"
+
+if [ ! -f "$VENV_PYTHON" ]; then
+    VENV_PYTHON="python3"
+fi
+
+case "$1" in
+    start)
+        echo "[TikTok Live] Starting stream process in background..."
+        $VENV_PYTHON -c "from stream_engine import engine; success, msg = engine.start_stream(); print(msg)"
+        ;;
+    stop)
+        echo "[TikTok Live] Stopping stream process..."
+        $VENV_PYTHON -c "from stream_engine import engine; success, msg = engine.stop_stream(); print(msg)"
+        ;;
+    restart)
+        echo "[TikTok Live] Restarting stream process..."
+        $VENV_PYTHON -c "from stream_engine import engine; engine.stop_stream(); success, msg = engine.start_stream(); print('Restarted stream.')"
+        ;;
+    status)
+        $VENV_PYTHON -c "from stream_engine import engine; import json; print(json.dumps(engine.get_telemetry(), indent=2))"
+        ;;
+    web)
+        PORT="${2:-8080}"
+        echo "[TikTok Live] Starting Web Dashboard & REST API Server on http://0.0.0.0:$PORT ..."
+        $VENV_PYTHON -m uvicorn app:app --host 0.0.0.0 --port "$PORT"
+        ;;
+    test)
+        echo "[TikTok Live] Generating test video pattern..."
+        $VENV_PYTHON -c "from stream_engine import engine; engine.create_fallback_test_video(); print('Test video pattern created successfully!')"
+        ;;
+    connect)
+        USERNAME="${2:-}"
+        if [ -z "$USERNAME" ]; then
+            echo "Usage: ./tiktok-live connect <username>"
+            exit 1
+        fi
+        echo "[TikTok Live] Connecting to live room: @$USERNAME ..."
+        $VENV_PYTHON -c "from tiktok_live_client import live_client; live_client.configure('$USERNAME'); print('Connected' if live_client.connect_async() else 'Failed: ' + live_client.last_error)"
+        ;;
+    ai-test)
+        COMMENT="${2:-hello}"
+        echo "[TikTok Live] Testing AI response to: $COMMENT ..."
+        $VENV_PYTHON -c "from ai_engine import ai_engine; print(ai_engine.generate_response('$COMMENT', 'TestUser') or 'AI not configured')"
+        ;;
+    ai-persona)
+        PERSONA="${2:-assistant}"
+        echo "[TikTok Live] Setting AI persona to: $PERSONA ..."
+        $VENV_PYTHON -c "from ai_engine import ai_engine; ai_engine.set_persona('$PERSONA'); print('Persona set to: ' + ai_engine.persona)"
+        ;;
+    server-start)
+        echo "[TikTok Live] Starting web server..."
+        bash "$BASE_DIR/start_server.sh"
+        ;;
+    server-stop)
+        echo "[TikTok Live] Stopping web server..."
+        tmux kill-session -t tiktok-live 2>/dev/null && echo "Server stopped" || echo "Server not running"
+        ;;
+    login)
+        echo "[TikTok Live] Opening browser for interactive login..."
+        $VENV_PYTHON "$BASE_DIR/login_helper.py"
+        ;;
+    vnc)
+        echo "[TikTok Live] Starting VNC environment for login..."
+        bash "$BASE_DIR/vnc_login.sh"
+        ;;
+    session-extract)
+        echo "[TikTok Live] Extracting session ID from browser..."
+        $VENV_PYTHON "$BASE_DIR/session_validator.py"
+        ;;
+    *)
+        echo "=================================================="
+        echo "        TikTok Live Stream Automation CLI         "
+        echo "=================================================="
+        echo "Usage: ./tiktok-live [command]"
+        echo ""
+        echo "Commands:"
+        echo "  start     : Start RTMP streaming in background"
+        echo "  stop      : Stop active RTMP stream"
+        echo "  restart   : Restart stream process"
+        echo "  status    : Print live stream & system status JSON"
+        echo "  web [port]: Launch Web Control Center (default port 8080)"
+        echo "  test              : Generate fallback test video pattern"
+        echo "  connect [user]    : Connect to TikTok live room by username"
+        echo "  ai-test [comment] : Test AI response to a comment"
+        echo "  ai-persona [name] : Set AI persona (coder/salesperson/assistant)"
+        echo "  server-start       : Start web dashboard server"
+        echo "  server-stop        : Stop web dashboard server"
+        echo "  login              : Open browser for interactive TikTok login"
+        echo "  vnc                : Start VNC server for remote browser login"
+        echo "  session-extract    : Extract session ID from logged-in browser"
+        echo "=================================================="
+        ;;
+esac

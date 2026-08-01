@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="theme-color" content="#090d16">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <base href="/tiktok_live/">
+    <title>TikTok Live Automated System</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="static/style.css?v=1.1.3">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <div class="background-globes">
+        <div class="globe globe-1"></div>
+        <div class="globe globe-2"></div>
+        <div class="globe globe-3"></div>
+    </div>
+
+    <!-- Mobile Top Header -->
+    <div class="mobile-header">
+        <div class="brand-mini">
+            <div class="brand-icon-sm"><i class="fa-brands fa-tiktok"></i></div>
+            <span class="brand-title">TikTok Live PRO</span>
+        </div>
+        <div class="mobile-status-badge">
+            <span class="status-indicator" id="mobileStatusIndicator"></span>
+            <span id="mobileStatusText">STOPPED</span>
+        </div>
+    </div>
+
+    <div class="app-layout">
+        <!-- Desktop Sidebar Navigation -->
+        <aside class="sidebar">
+            <div class="brand">
+                <div class="brand-icon">
+                    <i class="fa-brands fa-tiktok"></i>
+                </div>
+                <div class="brand-text">
+                    <h2>TikTok Live</h2>
+                    <span class="badge badge-auto">AUTOMATION PRO</span>
+                </div>
+            </div>
+
+            <nav class="nav-menu">
+                <a href="#dashboard" class="nav-item active" data-tab="dashboard">
+                    <i class="fa-solid fa-gauge-high"></i>
+                    <span>Bảng Điều Khiển</span>
+                </a>
+                <a href="#config" class="nav-item" data-tab="config">
+                    <i class="fa-solid fa-sliders"></i>
+                    <span>Cấu Hình Stream</span>
+                </a>
+                <a href="#media" class="nav-item" data-tab="media">
+                    <i class="fa-solid fa-photo-film"></i>
+                    <span>Quản Lý Playlist</span>
+                </a>
+                <a href="#logs" class="nav-item" data-tab="logs">
+                    <i class="fa-solid fa-terminal"></i>
+                    <span>Nhật Ký Hệ Thống</span>
+                </a>
+                <a href="#ai" class="nav-item" data-tab="ai">
+                    <i class="fa-solid fa-brain"></i>
+                    <span>AI Trợ Lý</span>
+                </a>
+                <a href="#live" class="nav-item" data-tab="live">
+                    <i class="fa-solid fa-comments"></i>
+                    <span>Live Comment</span>
+                </a>
+            </nav>
+
+            <div class="system-status-mini">
+                <div class="status-indicator" id="miniStatusIndicator"></div>
+                <div class="status-text">
+                    <span class="label">TRẠNG THÁI</span>
+                    <strong id="miniStatusText">STOPPED</strong>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            <!-- Header -->
+            <header class="top-header">
+                <div class="page-title">
+                    <h1 id="pageTitleText">Bảng Điều Khiển Stream</h1>
+                    <p class="subtitle">Hệ thống phát sóng tự động 24/7 lên TikTok Live RTMP</p>
+                </div>
+
+                <div class="header-actions">
+                    <button class="btn btn-emerald" id="btnStartStream">
+                        <i class="fa-solid fa-play"></i>
+                        <span>BẮT ĐẦU LIVE</span>
+                    </button>
+                    <button class="btn btn-rose" id="btnStopStream" disabled>
+                        <i class="fa-solid fa-square"></i>
+                        <span>DỪNG STREAM</span>
+                    </button>
+                    <button class="btn btn-amber" id="btnRestartStream">
+                        <i class="fa-solid fa-rotate-right"></i>
+                        <span>KHIỂN LẠI</span>
+                    </button>
+                </div>
+            </header>
+
+            <!-- TAB 1: DASHBOARD -->
+            <section class="tab-page active" id="tab-dashboard">
+                <!-- Telemetry Cards Grid -->
+                <div class="metrics-grid">
+                    <div class="metric-card glass">
+                        <div class="card-icon cyan">
+                            <i class="fa-solid fa-signal"></i>
+                        </div>
+                        <div class="card-info">
+                            <span class="card-label">TRẠNG THÁI STREAM</span>
+                            <h3 class="card-value" id="valStreamStatus">STOPPED</h3>
+                            <span class="card-sub" id="valUptime">Thời gian phát: 00:00:00</span>
+                        </div>
+                    </div>
+
+                    <div class="metric-card glass">
+                        <div class="card-icon purple">
+                            <i class="fa-solid fa-microchip"></i>
+                        </div>
+                        <div class="card-info">
+                            <span class="card-label">TẢI CPU HỆ THỐNG</span>
+                            <h3 class="card-value" id="valCpu">0%</h3>
+                            <div class="progress-bar"><div class="progress-fill" id="barCpu" style="width: 0%;"></div></div>
+                        </div>
+                    </div>
+
+                    <div class="metric-card glass">
+                        <div class="card-icon emerald">
+                            <i class="fa-solid fa-memory"></i>
+                        </div>
+                        <div class="card-info">
+                            <span class="card-label">BỘ NHỚ RAM</span>
+                            <h3 class="card-value" id="valRam">0 / 0 MB</h3>
+                            <div class="progress-bar"><div class="progress-fill emerald" id="barRam" style="width: 0%;"></div></div>
+                        </div>
+                    </div>
+
+                    <div class="metric-card glass">
+                        <div class="card-icon amber">
+                            <i class="fa-solid fa-clapperboard"></i>
+                        </div>
+                        <div class="card-info">
+                            <span class="card-label">PLAYLIST VIDEO</span>
+                            <h3 class="card-value" id="valPlaylistCount">0 Video</h3>
+                            <span class="card-sub" id="valResolution">Độ phân giải: 1080x1920</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Preview & Quick Monitor Panel -->
+                <div class="dashboard-panels">
+                    <div class="panel glass">
+                        <div class="panel-header">
+                            <h3><i class="fa-solid fa-desktop"></i> Màn Hình Xem Trước Simulated Broadcast</h3>
+                            <span class="badge" id="badgeResolution">1080x1920 (TikTok Vertical)</span>
+                        </div>
+                        <div class="panel-body preview-container">
+                            <div class="video-preview-wrapper">
+                                <div class="stream-screen" id="streamScreen">
+                                    <img id="previewImg" src="" alt="No Preview" class="screen-preview-img" style="display:none;width:100%;height:100%;object-fit:contain;">
+                                    <div class="screen-placeholder" id="screenPlaceholder">
+                                        <div class="live-dot-container">
+                                            <span class="pulse-dot" id="screenDot"></span>
+                                            <span class="status-overlay" id="screenText">STREAM DISCONNECTED</span>
+                                        </div>
+                                        <div class="screen-overlay-clock" id="screenClock">00:00:00</div>
+                                        <div class="screen-overlay-text" id="screenOverlayText">TIKTOK LIVE STREAM AUTOMATION</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="panel glass">
+                        <div class="panel-header">
+                            <h3><i class="fa-solid fa-list-check"></i> Thông Tin Kỹ Thuật Live</h3>
+                        </div>
+                        <div class="panel-body">
+                            <div class="info-table">
+                                <div class="info-row">
+                                    <span>RTMP Server:</span>
+                                    <strong id="infoRtmpUrl" class="text-truncate">Chưa cấu hình</strong>
+                                </div>
+                                <div class="info-row">
+                                    <span>Stream Key:</span>
+                                    <strong id="infoStreamKey">••••••••••••</strong>
+                                </div>
+                                <div class="info-row">
+                                    <span>Tự Động Kết Nối Lại:</span>
+                                    <strong class="text-emerald"><i class="fa-solid fa-circle-check"></i> Đang bật (5s)</strong>
+                                </div>
+                                <div class="info-row">
+                                    <span>Số Lần Reconnect:</span>
+                                    <strong id="infoReconnectCount">0 lần</strong>
+                                </div>
+                                <div class="info-row">
+                                    <span>Lỗi Gần Nhất:</span>
+                                    <strong id="infoLastError" class="text-rose">Không có lỗi</strong>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- TAB 2: CONFIGURATION -->
+            <section class="tab-page" id="tab-config">
+                            <!-- Auto Fetch Key Feature Box -->
+                <div class="panel glass mb-6">
+                    <div class="panel-header">
+                        <h3><i class="fa-solid fa-wand-magic-sparkles text-cyan"></i> Lấy Stream Key Tự Động (Auto Fetch)</h3>
+                    </div>
+                    <div class="panel-body">
+                        <div class="auto-fetch-box">
+                            <p class="text-sm text-muted mb-4">
+                                <strong>Cách 1:</strong> Dán mã Cookie <code>sessionid</code> từ tài khoản TikTok để hệ thống tự động lấy Stream Key.
+                            </p>
+                            <div class="form-row" style="margin-bottom: 1rem;">
+                                <button type="button" id="btnExtractSession" class="btn btn-outline btn-sm" style="margin-right: 0.5rem;">
+                                    <i class="fa-solid fa-magnifying-glass"></i> Tự Động Lấy Session ID
+                                </button>
+                                <span id="extractSessionStatus" class="text-xs text-muted"></span>
+                            </div>
+                            <form id="autoFetchForm" class="auto-fetch-form">
+                                <div class="form-group col-full">
+                                    <label><i class="fa-solid fa-cookie-bite"></i> TikTok Session ID (Cookie)</label>
+                                    <input type="password" id="cfgSessionId" class="form-input" placeholder="Dán mã sessionid của TikTok (VD: e4a7f8...)" required>
+                                    <small class="form-help">
+                                        <strong>Hướng dẫn lấy Session ID:</strong><br>
+                                        1. Mở tiktok.com trên Chrome, đăng nhập tài khoản có bật Live<br>
+                                        2. Nhấn F12 → Tab Application/Cookies → tìm <code>sessionid</code><br>
+                                        3. Copy giá trị (không copy tên cookie, chỉ copy value)<br>
+                                        <span style="color: var(--accent-amber);">⚠ Yêu cầu: Tài khoản 18+ | 1000+ followers | Đã bật tính năng Live</span>
+                                    </small>
+                                </div>
+                                <button type="submit" class="btn btn-cyan btn-block mt-3" id="btnAutoFetchKey">
+                                    <i class="fa-solid fa-key"></i> TỰ ĐỘNG LẤY STREAM KEY & LƯU CẤU HÌNH
+                                </button>
+                            </form>
+
+                            <div class="form-actions col-full mt-4">
+                                <div style="background: rgba(6, 182, 212, 0.08); padding: 16px; border-radius: 10px; border: 1px dashed rgba(6, 182, 212, 0.3);">
+                                    <strong style="color: var(--accent-cyan);">📺 Cách 2: Lấy từ TikTok Live Studio</strong>
+                                    <p style="color: var(--text-muted); margin-top: 8px; font-size: 12px; line-height: 1.6;">
+                                        1. Truy cập <strong>tiktok.com/live/studio</strong> → đăng nhập<br>
+                                        2. Chuyển sang tab <strong>Stream Settings</strong> / <strong>Stream with OBS</strong><br>
+                                        3. Copy <code>RTMP Server URL</code> và <code>Stream Key</code> bên dưới<br>
+                                        4. Dán vào form thủ công bên dưới → nhấn <strong>LƯU CẤU HÌNH STEAM</strong>
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel glass">
+                    <div class="panel-header">
+                        <h3><i class="fa-solid fa-gears"></i> Cấu Hình Luồng RTMP & Chất Lượng Stream Thủ Công</h3>
+                    </div>
+                    <div class="panel-body">
+                        <form id="configForm" class="config-grid">
+                            <div class="form-group col-full">
+                                <label><i class="fa-solid fa-link"></i> TikTok RTMP Server URL</label>
+                                <input type="text" id="cfgRtmpUrl" class="form-input" placeholder="rtmp://live-push.tiktok.com/live/" required>
+                                <small class="form-help">URL máy chủ live của TikTok thu thập từ TikTok Live Studio hoặc máy chủ RTMP của bạn.</small>
+                            </div>
+
+                            <div class="form-group col-full">
+                                <label><i class="fa-solid fa-key"></i> Stream Key (Khóa Luồng TikTok)</label>
+                                <input type="password" id="cfgStreamKey" class="form-input" placeholder="Nhập Stream Key TikTok..." required>
+                                <small class="form-help">Stream key cá nhân từ TikTok Live Studio / TikTok Creator Center.</small>
+                            </div>
+
+                            <div class="form-group">
+                                <label><i class="fa-solid fa-expand"></i> Khung Hình / Độ Phân Giải</label>
+                                <select id="cfgResolution" class="form-select">
+                                    <option value="1080x1920">1080x1920 (TikTok Dọc 9:16 - Chuẩn)</option>
+                                    <option value="720x1280">720x1280 (TikTok Dọc HD)</option>
+                                    <option value="1920x1080">1920x1080 (Khung Ngang 16:9)</option>
+                                    <option value="1280x720">1280x720 (Khung Ngang HD)</option>
+                                </select>
+                            </div>
+
+                            <div class="form-group">
+                                <label><i class="fa-solid fa-sliders"></i> Bitrate Video (Kbps)</label>
+                                <select id="cfgVideoBitrate" class="form-select">
+                                    <option value="4000k">4000 kbps (1080p Mượt)</option>
+                                    <option value="3000k">3000 kbps (Tiêu chuẩn)</option>
+                                    <option value="2000k">2000 kbps (Tiết kiệm băng thông)</option>
+                                    <option value="6000k">6000 kbps (Siêu Nét Full HD)</option>
+                                </select>
+                            </div>
+
+                            <div class="form-group col-full">
+                                <label><i class="fa-solid fa-heading"></i> Văn Bản Chữ Nổi (Overlay Text trên Video)</label>
+                                <input type="text" id="cfgOverlayText" class="form-input" placeholder="VD: SẢN PHẨM GIẢM GIÁ 50% - ĐẶT HÀNG NGAY">
+                            </div>
+
+                            <div class="form-group checkbox-group">
+                                <label class="checkbox-label">
+                                    <input type="checkbox" id="cfgLoop" checked>
+                                    <span>Tự động Lặp lại Playlist Video liên tục (Loop 24/7)</span>
+                                </label>
+                            </div>
+
+                            <div class="form-group checkbox-group">
+                                <label class="checkbox-label">
+                                    <input type="checkbox" id="cfgAutoReconnect" checked>
+                                    <span>Tự động kết nối lại khi đứt mạng (Auto Reconnect)</span>
+                                </label>
+                            </div>
+
+                            <div class="form-group checkbox-group">
+                                <label class="checkbox-label">
+                                    <input type="checkbox" id="cfgShowClock" checked>
+                                    <span>Hiển thị đồng hồ thời gian thực trên video</span>
+                                </label>
+                            </div>
+
+                            <div class="form-actions col-full">
+                                <button type="submit" class="btn btn-emerald btn-lg btn-block">
+                                    <i class="fa-solid fa-floppy-disk"></i> LƯU CẤU HÌNH STEAM
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </section>
+
+            <!-- TAB 3: MEDIA PLAYLIST -->
+            <section class="tab-page" id="tab-media">
+                <div class="panel glass">
+                    <div class="panel-header">
+                        <h3><i class="fa-solid fa-folder-open"></i> Danh Sách Video Phát Stream</h3>
+                        <div style="display:flex; gap:0.5rem;">
+                            <label class="btn btn-cyan btn-sm cursor-pointer">
+                                <i class="fa-solid fa-upload"></i> TẢI VIDEO MỚI
+                                <input type="file" id="fileUploadInput" accept="video/*" style="display:none;">
+                            </label>
+                            <button type="button" id="btnOpenUrlModal" class="btn btn-outline btn-sm">
+                                <i class="fa-solid fa-link"></i> Thêm Từ URL (TikTok/YouTube/...)
+                            </button>
+                        </div>
+                    </div>
+                    <div class="panel-body">
+                        <div class="media-list-container" id="mediaListContainer">
+                            <div class="empty-state">Đang tải danh sách video...</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- URL Download Modal -->
+            <div id="urlModal" class="modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:1000;">
+                <div class="modal-content" style="background:#1f2937;border-radius:12px;padding:24px;max-width:500px;margin:80px auto;position:relative;">
+                    <h3 style="margin-top:0;"><i class="fa-solid fa-link text-cyan"></i> Thêm Video Từ URL</h3>
+                    <p class="text-sm text-muted mb-4">
+                        Dán URL TikTok, YouTube, Facebook... Hệ thống sẽ tải về, convert về H.264 1080x1920 30fps và tự động thêm vào playlist.
+                    </p>
+                    <input type="text" id="inputVideoUrl" class="form-input" placeholder="https://vm.tiktok.com/xxx/..." style="margin-bottom:1rem;">
+                    <div style="display:flex;gap:0.5rem;justify-content:flex-end;">
+                        <button type="button" id="btnCancelUrl" class="btn btn-outline btn-sm">Hủy</button>
+                        <button type="button" id="btnDownloadUrl" class="btn btn-cyan btn-sm">
+                            <i class="fa-solid fa-download"></i> Tải Về
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- TAB 5: AI Assistant -->
+            <section class="tab-page" id="tab-ai">
+                <div class="panel glass mb-6">
+                    <div class="panel-header">
+                        <h3><i class="fa-solid fa-brain text-cyan"></i> AI Trợ Lý Live</h3>
+                    </div>
+                    <div class="panel-body">
+                        <div class="ai-config-box">
+                            <p class="text-sm text-muted mb-4">
+                                Cấu hình AI để tự động trả lời bình luận trong khi streaming. Hệ thống hỗ trợ 3 persona: <strong>Coder</strong>, <strong>Salesperson</strong>, và <strong>Assistant</strong>.
+                            </p>
+                            
+                            <form id="aiConfigForm" class="config-grid">
+                                <div class="form-group col-full">
+                                    <label><i class="fa-solid fa-key"></i> OpenAI API Key</label>
+                                    <input type="password" id="aiApiKey" class="form-input" placeholder="sk-..." required>
+                                    <small class="form-help">Nhập API key từ <a href="https://platform.openai.com/api-keys" target="_blank">OpenAI Platform</a>.</small>
+                                </div>
+
+                                <div class="form-group">
+                                    <label><i class="fa-solid fa-cog"></i> Model</label>
+                                    <select id="aiModel" class="form-select">
+                                        <option value="gpt-4o-mini">gpt-4o-mini (Nhanh & Tiết kiệm)</option>
+                                        <option value="gpt-4o">gpt-4o (Chất lượng cao)</option>
+                                        <option value="gpt-3.5-turbo">gpt-3.5-turbo (Miễn phí)</option>
+                                    </select>
+                                </div>
+
+                                <div class="form-group">
+                                    <label><i class="fa-solid fa-user-robot"></i> Persona</label>
+                                    <select id="aiPersona" class="form-select">
+                                        <option value="assistant">Trợ lý chung (Assistant)</option>
+                                        <option value="coder">Lập trình viên (Coder)</option>
+                                        <option value="salesperson">Chuyên gia bán hàng (Salesperson)</option>
+                                    </select>
+                                </div>
+
+                                <div class="form-group checkbox-group">
+                                    <label class="checkbox-label">
+                                        <input type="checkbox" id="aiEnabled">
+                                        <span>Bật AI tự động trả lời bình luận</span>
+                                    </label>
+                                </div>
+
+                                <div class="form-actions col-full">
+                                    <button type="submit" class="btn btn-cyan btn-lg btn-block">
+                                        <i class="fa-solid fa-save"></i> LƯU CẤU HÌNH AI
+                                    </button>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel glass">
+                    <div class="panel-header">
+                        <h3><i class="fa-solid fa-clock-rotate-left"></i> Lịch Sử Phản Hồi AI</h3>
+                        <button class="btn btn-dark btn-sm" id="btnClearAICache">
+                            <i class="fa-solid fa-trash"></i> Xóa Cache
+                        </button>
+                    </div>
+                    <div class="panel-body p-0">
+                        <div class="ai-response-log" id="aiResponseLog">
+                            <div class="log-line text-muted">Chưa có phản hồi AI nào.</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- TAB 6: Live Comments -->
+            <section class="tab-page" id="tab-live">
+                <div class="panel glass mb-6">
+                    <div class="panel-header">
+                        <h3><i class="fa-solid fa-wifi"></i> Kết Nối TikTok Live</h3>
+                    </div>
+                    <div class="panel-body">
+                        <form id="liveConnectForm" class="auto-fetch-form">
+                            <div class="form-group col-full">
+                                <label><i class="fa-solid fa-user"></i> Username TikTok Live</label>
+                                <input type="text" id="liveUsername" class="form-input" placeholder="@username hoặc username" required>
+                                <small class="form-help">Nhập username TikTok của tài khoản bạn đang live (ví dụ: tiktok, hoặc @tiktok).</small>
+                            </div>
+                            <div class="form-group checkbox-group">
+                                <label class="checkbox-label">
+                                    <input type="checkbox" id="liveAutoConnect" checked>
+                                    <span>Tự động kết nối khi bật stream</span>
+                                </label>
+                            </div>
+                            <button type="submit" class="btn btn-cyan btn-block mt-3" id="btnLiveConnect">
+                                <i class="fa-solid fa-plug-waveform"></i> KẾT NỐI TIKTOK LIVE
+                            </button>
+                        </form>
+                        
+                        <div class="live-stats-grid" style="display: none;" id="liveStatsGrid">
+                            <div class="metric-card glass">
+                                <div class="card-icon cyan">
+                                    <i class="fa-solid fa-eye"></i>
+                                </div>
+                                <div class="card-info">
+                                    <span class="card-label">NGƯỜI XEM</span>
+                                    <h3 class="card-value" id="valLiveViewers">0</h3>
+                                </div>
+                            </div>
+                            <div class="metric-card glass">
+                                <div class="card-icon amber">
+                                    <i class="fa-solid fa-comment-dots"></i>
+                                </div>
+                                <div class="card-info">
+                                    <span class="card-label">BÌNH LUẬN</span>
+                                    <h3 class="card-value" id="valLiveComments">0</h3>
+                                </div>
+                            </div>
+                            <div class="metric-card glass">
+                                <div class="card-icon emerald">
+                                    <i class="fa-solid fa-gift"></i>
+                                </div>
+                                <div class="card-info">
+                                    <span class="card-label">QUÀ TẶNG</span>
+                                    <h3 class="card-value" id="valLiveGifts">0</h3>
+                                </div>
+                            </div>
+                            <div class="metric-card glass">
+                                <div class="card-icon purple">
+                                    <i class="fa-solid fa-user-plus"></i>
+                                </div>
+                                <div class="card-info">
+                                    <span class="card-label">FOLLOW</span>
+                                    <h3 class="card-value" id="valLiveFollows">0</h3>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel glass">
+                    <div class="panel-header">
+                        <h3><i class="fa-solid fa-comment-dots"></i> Bình Luận Trực Tuyến</h3>
+                        <button class="btn btn-dark btn-sm" id="btnClearComments">
+                            <i class="fa-solid fa-broom"></i> Xóa Danh Sách
+                        </button>
+                    </div>
+                    <div class="panel-body p-0">
+                        <div class="live-comment-feed" id="liveCommentFeed">
+                            <div class="comment-item text-muted">Chưa kết nối tới live room...</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- TAB 4: LOGS -->
+            <section class="tab-page" id="tab-logs">
+                <div class="panel glass">
+                    <div class="panel-header">
+                        <h3><i class="fa-solid fa-terminal"></i> Nhật Ký FFmpeg & Stream Core</h3>
+                        <button class="btn btn-dark btn-sm" id="btnRefreshLogs">
+                            <i class="fa-solid fa-arrows-rotate"></i> Tải Lại Logs
+                        </button>
+                    </div>
+                    <div class="panel-body p-0">
+                        <div class="log-terminal" id="logTerminal">
+                            <div class="log-line text-muted">Đang kết nối nhật ký...</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Mobile Bottom Navigation Bar -->
+    <nav class="mobile-bottom-nav">
+        <a href="#dashboard" class="mobile-nav-item active" data-tab="dashboard">
+            <i class="fa-solid fa-gauge-high"></i>
+            <span>Dashboard</span>
+        </a>
+        <a href="#config" class="mobile-nav-item" data-tab="config">
+            <i class="fa-solid fa-sliders"></i>
+            <span>Cấu Hình</span>
+        </a>
+        <a href="#media" class="mobile-nav-item" data-tab="media">
+            <i class="fa-solid fa-photo-film"></i>
+            <span>Playlist</span>
+        </a>
+        <a href="#logs" class="mobile-nav-item" data-tab="logs">
+            <i class="fa-solid fa-terminal"></i>
+            <span>Logs</span>
+        </a>
+        <a href="#ai" class="mobile-nav-item" data-tab="ai">
+            <i class="fa-solid fa-brain"></i>
+            <span>AI</span>
+        </a>
+        <a href="#live" class="mobile-nav-item" data-tab="live">
+            <i class="fa-solid fa-comments"></i>
+            <span>Live</span>
+        </a>
+    </nav>
+
+    <!-- Notification Toast Container -->
+    <div id="toastContainer" class="toast-container"></div>
+
+    <!-- {{VERSION}} is replaced by server with file hash -->
+    <script src="static/app.js?v=1.1.3"></script>
+</body>
+</html>
