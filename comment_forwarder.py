@@ -111,8 +111,18 @@ def _extract_cart_link(comment: str, ai_response: str) -> str:
     return None
 
 
-def forward_comment(username: str, comment: str, api_secret: str) -> dict:
+def fetch_active_media():
+    """Lay video dang live + product_tag/cart_link tu GET /api/live/active-media."""
+    code, info = _fetch_json(f"{SERVER_URL}/api/live/active-media")
+    if code == 200 and info:
+        return info
+    return {}
+
+
+def forward_comment(username: str, comment: str, api_secret: str, product_tag: str = None) -> dict:
     payload = {"username": username, "comment": comment}
+    if product_tag:
+        payload["product_tag"] = product_tag
     headers = {"Content-Type": "application/json"}
     if api_secret:
         headers["X-API-Key"] = api_secret
@@ -178,6 +188,12 @@ def start_listener():
     last_reply = 0.0
     REPLY_COOLDOWN = float(os.environ.get("REPLY_COOLDOWN", "5.0"))
 
+    # Fetch active video product_tag (AI trả lời theo sản phẩm đang live)
+    active_media = fetch_active_media()
+    active_tag = (active_media.get("product_tag") or "").strip()
+    active_cart = active_media.get("cart_link")
+    logger.info(f"Active media product_tag: {active_tag or '(none)'} | cart_link: {active_cart or '(none)'}")
+
     @client.on(CommentEvent)
     async def on_comment(event):
         nonlocal last_forward, last_reply
@@ -192,7 +208,7 @@ def start_listener():
             return
         logger.info(f"Got comment: @{nickname}: {comment_text}")
 
-        result = forward_comment(nickname, str(comment_text), api_secret)
+        result = forward_comment(nickname, str(comment_text), api_secret, product_tag=active_tag or None)
         ai_response = result.get("ai_response") if isinstance(result, dict) else None
         action = result.get("action") if isinstance(result, dict) else None
         if ai_response:
@@ -200,8 +216,8 @@ def start_listener():
                 logger.info("Reply on cooldown, skipping")
                 return
             last_reply = now
-            # Ghep link gio hang tu ban comment + ai_response
-            cart_link = _extract_cart_link(comment_text, ai_response)
+            # Uu tien cart_link tu video dang live, sau do moi den PRODUCTS keyword
+            cart_link = active_cart or _extract_cart_link(comment_text, ai_response)
             reply_text = ai_response if not cart_link else f"{ai_response}\nMua ngay: {cart_link}"
             try:
                 await asyncio.wait_for(client.send_room_chat(reply_text), timeout=5)

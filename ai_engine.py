@@ -161,15 +161,24 @@ class AIResponseEngine:
         """Get the current persona configuration."""
         return self.PERSONAS.get(self.persona, self.PERSONAS["assistant"])
 
-    def _build_system_prompt(self) -> str:
+    def _build_system_prompt(self, product_tag: Optional[str] = None) -> str:
         """Build the system prompt combining live context + persona + custom."""
         persona_config = self._get_persona_config()
         parts = [self.LIVE_CONTEXT_PROMPT, persona_config["system_prompt"]]
         if self.custom_system_prompt:
             parts.append(self.custom_system_prompt)
+        if product_tag:
+            parts.append(
+                f"## Sản phẩm đang live\n"
+                f"Video live stream hiện đang giới thiệu sản phẩm: {product_tag}.\n"
+                f"Hãy trả lời ngắn gọn, tự nhiên, nhấn mạnh lợi ích/giá của {product_tag} "
+                f"và gợi gắn liên kết mua hàng (link giỏ hàng sẽ được chèn tự động)."
+            )
         return "\n\n---\n\n".join(parts)
 
-    def generate_response(self, comment: str, username: str = " Viewer", context: Optional[List[Dict]] = None) -> Optional[str]:
+    def generate_response(self, comment: str, username: str = " Viewer",
+                          context: Optional[List[Dict]] = None,
+                          product_tag: Optional[str] = None) -> Optional[str]:
         """
         Generate an AI response to a comment.
         Returns None if AI is disabled or on error.
@@ -186,7 +195,7 @@ class AIResponseEngine:
 
         # Build conversation context
         messages = [
-            {"role": "system", "content": self._build_system_prompt()},
+            {"role": "system", "content": self._build_system_prompt(product_tag=product_tag)},
         ]
         
         # Add recent history

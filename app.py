@@ -757,6 +757,8 @@ def get_live_comments(count: int = 20):
 class ForwardCommentModel(BaseModel):
     username: str
     comment: str
+    product_tag: Optional[str] = None
+    cart_link: Optional[str] = None
 
 @app.get("/api/live/session-info")
 def live_session_info():
@@ -802,12 +804,53 @@ def forward_comment(req: ForwardCommentModel):
     # Generate AI response - returned to forwarder so it can reply on TikTok comment panel
     ai_response = ""
     if ai_engine.is_available() and ai_engine.enabled:
-        ai_response = ai_engine.generate_response(req.comment, req.username) or ""
+        ai_response = ai_engine.generate_response(req.comment, req.username, product_tag=req.product_tag) or ""
 
     return {
         "success": True,
         "message": f"Comment forwarded by @{req.username}",
         "ai_response": ai_response,
+    }
+
+class TagMediaModel(BaseModel):
+    filename: str
+    product_tag: str
+    cart_link: Optional[str] = None
+    keywords: Optional[str] = None
+
+
+@app.post("/api/media/tag")
+def tag_media(model: TagMediaModel):
+    path = os.path.join(LOGS_DIR, "video_tags.json")
+    tags = {}
+    if os.path.exists(path):
+        try:
+            tags = json.load(open(path))
+        except Exception:
+            tags = {}
+    tags[model.filename] = {"product_tag": model.product_tag, "cart_link": model.cart_link, "keywords": model.keywords or ""}
+    with open(path, "w") as f:
+        json.dump(tags, f, indent=2)
+    return {"success": True, "tagged": model.filename, "product_tag": model.product_tag}
+
+
+@app.get("/api/live/active-media")
+def get_active_media():
+    """Trả info video dang live + product_tag/cart_link (dùng comment_forwarder)."""
+    cfg = engine.load_config()
+    filename = cfg.get("active_media")
+    path = os.path.join(LOGS_DIR, "video_tags.json")
+    tag = {}
+    if filename and os.path.exists(path):
+        try:
+            tag = json.load(open(path)).get(filename, {})
+        except Exception:
+            tag = {}
+    return {
+        "filename": filename,
+        "product_tag": tag.get("product_tag"),
+        "cart_link": tag.get("cart_link"),
+        "keywords": tag.get("keywords", ""),
     }
 
 @app.get("/api/live/gifts")
