@@ -376,10 +376,10 @@ async def upload_media(file: UploadFile = File(...)):
                 subprocess.run([
                     "ffmpeg", "-y", "-i", target_path,
                     "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:0:0:black,fps=30",
-                    "-c:v", "libx264", "-preset", "medium", "-crf", "23",
+                    "-c:v", "libx264", "-preset", "superfast", "-crf", "23",
                     "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
                     converted_path
-                ], capture_output=True, timeout=600)
+                ], capture_output=True, timeout=1800)
                 if os.path.exists(converted_path) and os.path.getsize(converted_path) > 100000:
                     os.replace(converted_path, target_path)
                     logger.info(f"Video converted to H.264: {file.filename}")
@@ -524,10 +524,10 @@ async def download_tiktok_video(req: TikTokUrlModel):
             subprocess.run([
                 "ffmpeg", "-y", "-i", target_path,
                 "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:0:0:black,fps=30",
-                "-c:v", "libx264", "-preset", "medium", "-crf", "23",
+                "-c:v", "libx264", "-preset", "superfast", "-crf", "23",
                 "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
                 converted_path
-            ], capture_output=True, timeout=600)
+            ], capture_output=True, timeout=1800)
 
             if os.path.exists(converted_path) and os.path.getsize(converted_path) > 100000:
                 # Replace original with H.264 version, use same raw_filename

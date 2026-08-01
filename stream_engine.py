@@ -138,9 +138,11 @@ class StreamEngine:
             output_path
         ]
         try:
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180)
-        except:
-            pass
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=900)
+        except subprocess.TimeoutExpired:
+            logger.warning(f"Convert timeout for {input_path}, using original if valid")
+        except Exception as e:
+            logger.warning(f"Convert failed for {input_path}: {e}")
 
     def _convert_incompatible(self, config):
         """Convert non-H.264 videos to temp H.264 files before streaming."""
