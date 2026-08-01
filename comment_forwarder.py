@@ -220,10 +220,32 @@ def start_listener():
             _sid = ((_si or {}).get("tiktok_session") or "").strip()
             _tt = ((_si or {}).get("tiktok_tt_target_idc") or "").strip()
             if _sid:
-                # Nếu server chưa có tt-target-idc, tự trích xuất từ API TikTok
+                # Nếu server chưa có tt_target_idc, thử lấy từ cookie jar của client
                 if not _tt:
-                    _tt = _fetch_tt_target_idc_from_tiktok(_sid)
-                    logger.info(f"tt-target-idc extracted locally: {_tt or '(failed)'}")
+                    try:
+                        for _c in list(getattr(client.web.cookies, "jar", []) or []):
+                            if getattr(_c, "name", "") == "tt-target-idc" and getattr(_c, "value", ""):
+                                _tt = _c.value
+                                break
+                    except Exception:
+                        pass
+                    if not _tt:
+                        _tt = _fetch_tt_target_idc_from_tiktok(_sid)
+                        logger.info(f"tt-target-idc extracted locally: {_tt or '(failed)'}")
+
+                # Xóa tất cả tt-target-idc cookies để tránh conflict "Multiple cookies exist"
+                try:
+                    _jar = getattr(client.web.cookies, "jar", None)
+                    if _jar is not None:
+                        for _c in list(_jar):
+                            if getattr(_c, "name", "") == "tt-target-idc":
+                                try:
+                                    _jar.clear(_c.domain, _c.path, _c.name)
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
+
                 client.web.set_session(_sid, _tt or None)
                 logger.info(f"Session configured for send_room_chat (sid={_sid[:16]}..., tt_idc={_tt or 'none'})")
         except Exception as e:
