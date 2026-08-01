@@ -37,8 +37,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("Forwarder")
 
-# Server URL - forwarder tự fetch session từ server (zero config username)
-SERVER_URL = os.environ.get("SERVER_URL", "http://127.0.0.1:8888").rstrip("/")
+# Server URL — qua nginx HTTPS proxy (server bind 127.0.0.1, không expose port 8888 trực tiếp)
+#   SERVER_URL=https://freeforyou.win/tiktok_live   (cần nginx basic_auth)
+SERVER_URL = os.environ.get("SERVER_URL", "https://freeforyou.win/tiktok_live").rstrip("/")
+# Basic auth cho nginx proxy (format: "admin:tiktok99")
+BASIC_AUTH = os.environ.get("BASIC_AUTH") or None
 # Optional username override (bypass auto-fetch)
 USERNAME = os.environ.get("USERNAME", "").strip() or None
 WEB_PROXY = os.environ.get("WEB_PROXY") or None
@@ -55,22 +58,58 @@ except ImportError as e:
     logger.error(f"TikTokLive not installed: {e}")
 
 
-def forward_comment(username: str, comment: str) -> dict:
-    payload = json.dumps({"username": username, "comment": comment}).encode()
-    url = f"{SERVER_URL}/api/live/comment-forward"
-    req = urllib.request.Request(
-        url, data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+import ssl
+# Allow self-signed certificates on HTTPS proxies (dev)
+SSL_CTX = ssl.create_default_context()
+SSL_CTX.check_hostname = False
+SSL_CTX.verify_mode = ssl.CERT_NONE
+
+def _make_headers(extra=None):
+    h = {"Content-Type": "application/json"}
+    if BASIC_AUTH:
+        import base64
+        h["Authorization"] = "Basic " + base64.b64encode(BASIC_AUTH.encode()).decode()
+    if extra:
+        h.update(extra)
+    return h
+
+def _fetch_json(url, data=None):
+    """Fetch JSON from server via nginx proxy (HTTPS + basic auth)."""
+    payload = json.dumps(data).encode() if data else None
+    req = urllib.request.Request(url, data=payload, headers=_make_headers(), method="POST" if data else "GET")
     try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=8, context=SSL_CTX) as resp:
+            return resp.status, json.loads(resp.read().decode())
+    except Exception as e:
+        logger.error(f"Fetch {url} failed: {e}")
+        return None, {}
+
+def fetch_api_secret():
+    """Lấy api_key_secret từ GET /api/config (để gửi X-API-Key cho POST comment-forward)."""
+    code, data = _fetch_json(f"{SERVER_URL}/api/config")
+    if code == 200 and data.get("api_key_secret"):
+        return data["api_key_secret"]
+    return None
+
+
+def forward_comment(username: str, comment: str, api_secret: str) -> dict:
+    payload = {"username": username, "comment": comment}
+    headers = {"Content-Type": "application/json"}
+    if api_secret:
+        headers["X-API-Key"] = api_secret
+    if BASIC_AUTH:
+        import base64
+        headers["Authorization"] = "Basic " + base64.b64encode(BASIC_AUTH.encode()).decode()
+    body = json.dumps(payload).encode()
+    req = urllib.request.Request(f"{SERVER_URL}/api/live/comment-forward", data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=8, context=SSL_CTX) as resp:
             if resp.status != 200:
                 logger.warning(f"Server returned HTTP {resp.status}")
                 return {}
             return json.loads(resp.read().decode())
     except Exception as e:
-        logger.error(f"Forward failed to {url}: {e}")
+        logger.error(f"Forward failed to {SERVER_URL}/api/live/comment-forward: {e}")
         return {}
 
 
@@ -79,21 +118,28 @@ def start_listener():
         logger.error("TikTokLive library not installed. Exit.")
         sys.exit(1)
 
-    # Auto-fetch live username from server (zero config):
-    #   SERVER_URL=http://[vps-host]:8888 python3 comment_forwarder.py
+    # Auto-fetch live username + api_key_secret from server (zero config).
+    # SERVER_URL via nginx HTTPS proxy, dùng BASIC_AUTH env.
+    api_secret = None
+    try:
+        code, cfg = _fetch_json(f"{SERVER_URL}/api/config")
+        if code == 200 and cfg.get("api_key_secret"):
+            api_secret = cfg["api_key_secret"]
+    except Exception as e:
+        logger.error(f"Cannot fetch config from {SERVER_URL}/api/config: {e}")
+
     username = USERNAME
     if not username:
         try:
-            with urllib.request.urlopen(f"{SERVER_URL}/api/live/session-info", timeout=5) as resp:
-                info = json.loads(resp.read().decode())
+            code2, info = _fetch_json(f"{SERVER_URL}/api/live/session-info")
             username = (info.get("username") or "").strip()
-            logger.info(f"Fetched live username from server: {username or '(trống)'}")
+            logger.info(f"Fetched live username from server: {username or '(empty)'}")
         except Exception as e:
             logger.error(f"Cannot fetch session from {SERVER_URL}/api/live/session-info: {e}")
             logger.info("Falling back to USERNAME env var.")
-        if not username:
-            logger.error("No live username found. Set USERNAME env or ensure server has tiktok_username in config.")
-            sys.exit(1)
+    if not username:
+        logger.error("No live username found. Set USERNAME env or ensure server has tiktok_username in config.")
+        sys.exit(1)
 
     username = username.strip().lstrip("@")
     kwargs = {}
@@ -127,7 +173,7 @@ def start_listener():
             return
         logger.info(f"Got comment: @{nickname}: {comment_text}")
 
-        result = forward_comment(nickname, str(comment_text))
+        result = forward_comment(nickname, str(comment_text), api_secret)
         ai_response = result.get("ai_response") if isinstance(result, dict) else None
         if ai_response:
             # Reply the AI-generated response back onto TikTok comment panel
