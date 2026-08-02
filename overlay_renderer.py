@@ -68,7 +68,7 @@ class OverlayRenderer:
         self.active_avatars: Dict[str, dict] = {}
         self.avatar_pool: List[str] = []
         self.zodiac_pool: List[dict] = []
-        self._avatar_display_size: int = 80
+        self._avatar_display_size: int = 32
         self._avatar_cache: Dict[str, Image.Image] = {}
         self._font_cache: Dict[str, Any] = {}
         self._avatar_fall_duration: float = 1.5
@@ -86,6 +86,9 @@ class OverlayRenderer:
 
         # Pre-allocated transparent frame buffer for fast empty-frame writes
         self._transparent_canvas: Optional[Image.Image] = None
+
+        # Frame cache: avoid re-encoding PNG at high FPS when nothing changes
+        self._cached_frame: Optional[bytes] = None
 
         self._init_overlay_files()
 
@@ -227,7 +230,7 @@ class OverlayRenderer:
         draw.ellipse([0, 0, self._avatar_display_size, self._avatar_display_size], fill=color)
         initials = username[:2].upper() if username and username != "U" else "TV"
         try:
-            font = self._get_font("bold", 42)
+            font = self._get_font("bold", 14)
             bbox = draw.textbbox((0, 0), initials, font=font)
             tw = bbox[2] - bbox[0]
             th = bbox[3] - bbox[1]
@@ -277,12 +280,15 @@ class OverlayRenderer:
                 zodiac_name = None
                 animal_name = None
 
-            # Assign random position in lower 1/3 of screen (below 2/3 height)
-            top_bound = int(self._overlay_height * self._avatar_target_height_ratio)
-            bottom_bound = int(self._overlay_height * 0.90) - self._avatar_display_size
+            # Assign random position — proportional margins for any canvas size
+            margin_x = max(4, self._overlay_width // 10)
+            margin_top = max(4, self._overlay_height // 10)
+            margin_bottom = max(4, self._overlay_height // 8)
+            top_bound = margin_top
+            bottom_bound = self._overlay_height - self._avatar_display_size - margin_bottom
             if bottom_bound < top_bound:
                 bottom_bound = top_bound
-            x_pos = random.randint(60, max(self._overlay_width - self._avatar_display_size - 60, 60))
+            x_pos = random.randint(margin_x, max(self._overlay_width - self._avatar_display_size - margin_x, margin_x))
             target_y = random.randint(top_bound, max(bottom_bound, top_bound))
             join_time = time.time()
 
@@ -300,6 +306,7 @@ class OverlayRenderer:
                 "gift_count": 0,
                 "gift_until": 0,
             }
+        self._cached_frame = None
         logger.info(f"Viewer avatar added: {username} -> zodiac={zodiac_name}/{animal_name}")
 
     def trigger_gift_animation(self, username: str, gift_name: str = ""):
@@ -313,12 +320,14 @@ class OverlayRenderer:
                 with self._lock:
                     self.active_avatars[username]["gift_count"] = 1
                     self.active_avatars[username]["gift_until"] = time.time() + 5
+        self._cached_frame = None
         logger.info(f"Gift animation triggered for {username}: {gift_name}")
 
     def remove_viewer_avatar(self, username: str):
         """Remove a viewer's avatar."""
         with self._lock:
             self.active_avatars.pop(username, None)
+            self._cached_frame = None
 
     def remove_excess_avatars(self, count: int):
         """Remove the specified number of avatars that are closest to expiry
@@ -337,6 +346,7 @@ class OverlayRenderer:
         """Clear all active avatars (called when stream stops)."""
         with self._lock:
             self.active_avatars.clear()
+            self._cached_frame = None
 
     def start_overlay_fifo(self, width: int, height: int, fps: int = 4):
         """Create FIFO pipe and start overlay generation thread."""
@@ -404,7 +414,9 @@ class OverlayRenderer:
                 fifo = os.fdopen(fd, 'wb', buffering=0)
                 logger.info("Overlay FIFO connected to FFmpeg")
                 while not self._overlay_stop_event.is_set():
-                    frame = self._render_overlay_frame()
+                    if self._cached_frame is None:
+                        self._cached_frame = self._render_overlay_frame()
+                    frame = self._cached_frame
                     if frame:
                         try:
                             os.write(fd, frame)
@@ -526,27 +538,27 @@ class OverlayRenderer:
 
             img.paste(avatar_img, (x, y), avatar_img)
 
-            # Draw zodiac + animal name below avatar
-            display_name = zodiac_name if zodiac_name else username[:12]
-            font = self._get_font("bold", 18)
+            # Draw zodiac + animal name below avatar (scaled for small canvas)
+            display_name = zodiac_name if zodiac_name else username[:8]
+            font = self._get_font("bold", 8)
             try:
                 bbox = draw.textbbox((0, 0), display_name, font=font)
                 name_w = bbox[2] - bbox[0]
             except Exception:
-                name_w = len(display_name) * 12
-            name_y = y + avatar_size + 5
+                name_w = len(display_name) * 5
+            name_y = y + avatar_size + 1
 
-            animal_font = self._get_font("regular", 14)
+            animal_font = self._get_font("regular", 7)
             if animal_name:
                 try:
                     abbox = draw.textbbox((0, 0), animal_name, font=animal_font)
                     animal_w = abbox[2] - abbox[0]
                 except Exception:
-                    animal_w = len(animal_name) * 8
-                animal_y = name_y + 22
+                    animal_w = len(animal_name) * 4
+                animal_y = name_y + 10
             else:
                 animal_w = 0
-                animal_y = name_y + 22
+                animal_y = name_y + 10
 
             # Shadow (black, offset by 1)
             draw.text((x + avatar_size // 2 - name_w // 2 + 1, name_y + 1), display_name,

@@ -36,16 +36,19 @@ LOGS_DIR = os.path.join(BASE_DIR, "logs")
 os.makedirs(MEDIA_DIR, exist_ok=True)
 os.makedirs(LOGS_DIR, exist_ok=True)
 
-# Logger setup
+# Logger setup — basicConfig is a no-op if root already has handlers,
+# so we always add the FileHandler explicitly to ensure stream.log is written.
 log_file_path = os.path.join(LOGS_DIR, "stream.log")
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s] [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(log_file_path),
-        logging.StreamHandler(sys.stdout)
-    ]
 )
+_fmt = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s")
+_fh = logging.FileHandler(log_file_path)
+_fh.setFormatter(_fmt)
+_root = logging.getLogger()
+if not any(isinstance(h, logging.FileHandler) and getattr(h, "baseFilename", None) == log_file_path for h in _root.handlers):
+    _root.addHandler(_fh)
 logger = logging.getLogger("StreamEngine")
 
 
@@ -323,7 +326,8 @@ class StreamEngine:
             ])
             # repeatlast=1: hold last frame when overlay thread drops frames
             # eof_action=pass: continue base video if FIFO closes
-            filter_str = f"[0:v]{filter_str}[base];[1:v]overlay=0:0:format=auto:eof_action=pass:repeatlast=1[vout]"
+            # Scale 180x320 overlay up to video resolution before compositing
+            filter_str = f"[0:v]{filter_str}[base];[1:v]scale={w}:{h}:flags=lanczos[ovr];[base][ovr]overlay=0:0:format=auto:eof_action=pass:repeatlast=1[vout]"
             cmd.extend(["-filter_complex", filter_str, "-map", "[vout]", "-map", "0:a?"])
         else:
             cmd.extend(["-vf", filter_str])
@@ -409,8 +413,7 @@ class StreamEngine:
 
         # Start avatar overlay FIFO if enabled
         if overlay_renderer.enabled_overlays.get("avatar_overlay", False):
-            w, h = config.get("resolution", "1080x1920").split("x")
-            overlay_renderer.start_overlay_fifo(int(w), int(h), 4)
+            overlay_renderer.start_overlay_fifo(180, 320, 30)
             overlay_renderer.load_avatar_pool()
 
             # Apply zodiac-specific settings from config (with fallback defaults)
