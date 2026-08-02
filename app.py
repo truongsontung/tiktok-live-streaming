@@ -172,7 +172,7 @@ class ConfigModel(BaseModel):
     auto_reconnect: Optional[bool] = True
     overlay_text: Optional[str] = ""
     show_clock: Optional[bool] = True
-    overlay_enabled: Optional[bool] = False
+    overlay_enabled: Optional[bool] = True
     overlay_config: Optional[dict] = None
     tiktok_username: Optional[str] = ""
 
@@ -231,7 +231,7 @@ def save_config(cfg: ConfigModel):
         with open(old_path, "r") as f:
             old = json.load(f)
     writable = {"resolution","video_bitrate","audio_bitrate","fps","mode",
-                "loop","auto_reconnect","             overlay_text","show_clock","overlay_enabled","overlay_config","ai_enabled","ai_config"}
+                "loop","auto_reconnect","overlay_text","show_clock","overlay_enabled","overlay_config","ai_enabled","ai_config"}
     for k in writable:
         v = new.get(k)
         if v is not None and v != "":
@@ -973,37 +973,41 @@ def enable_overlay(enabled: bool):
 
 @app.post("/api/overlay/text")
 def set_overlay_text(model: OverlayTextModel):
-    """Set overlay text."""
-    overlay_renderer.set_overlay_text(model.text)
-    return {"success": True, "message": "Overlay text updated"}
+    """Text overlay is no longer supported — only avatar overlay."""
+    return {"success": False, "message": "Text overlay is deprecated. Only avatar overlay is supported."}
 
 @app.post("/api/overlay/comment")
 def add_overlay_comment(username: str, comment: str, is_ai_response: bool = False):
-    """Add a comment to the overlay display."""
-    overlay_renderer.add_comment(username, comment, is_ai_response)
-    return {"success": True, "message": "Comment added to overlay"}
+    """Comment overlay is no longer supported — only avatar overlay."""
+    return {"success": False, "message": "Comment overlay is deprecated. Only avatar overlay is supported."}
 
 @app.post("/api/overlay/welcome")
 def add_overlay_welcome(username: str = ""):
-    """Add a welcome message for a new viewer."""
-    overlay_renderer.add_welcome_message(username or "New viewer")
-    return {"success": True, "message": "Welcome message added to overlay"}
+    """Welcome message overlay is no longer supported — only avatar overlay."""
+    return {"success": False, "message": "Welcome overlay is deprecated. Only avatar overlay is supported."}
+
+class OverlayConfigModel(BaseModel):
+    avatar_overlay: bool = True
 
 @app.post("/api/overlay/config")
-def configure_overlays(enabled: bool, comment_scroll: bool = True, ai_response: bool = True, 
-                       viewer_count: bool = True, stats_panel: bool = True, clock: bool = True,
-                       welcome: bool = True):
-    """Configure which overlays are enabled."""
-    config = {
-        "clock": clock,
-        "comment_scroll": comment_scroll,
-        "ai_response": ai_response,
-        "viewer_count": viewer_count,
-        "stats_panel": stats_panel,
-        "welcome": welcome,
-    }
-    overlay_renderer.configure_overlays(config)
-    return {"success": True, "message": "Overlay configuration updated"}
+def configure_overlays(model: OverlayConfigModel):
+    """Configure avatar overlay on/off. Saves to config.json."""
+    avatar_overlay = model.avatar_overlay
+    config_dict = {"avatar_overlay": avatar_overlay}
+    overlay_renderer.configure_overlays(config_dict)
+    overlay_renderer.set_enabled(avatar_overlay)
+
+    # Persist to config.json
+    current_cfg = engine.load_config()
+    if "overlay_config" not in current_cfg:
+        current_cfg["overlay_config"] = {}
+    current_cfg["overlay_config"]["avatar_overlay"] = avatar_overlay
+    current_cfg["overlay_enabled"] = avatar_overlay
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(current_cfg, f, indent=2)
+
+    return {"success": True, "message": f"Avatar overlay {'enabled' if avatar_overlay else 'disabled'}",
+            "avatar_overlay": avatar_overlay}
 
 
 if __name__ == "__main__":

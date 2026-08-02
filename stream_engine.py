@@ -303,26 +303,27 @@ class StreamEngine:
         # Scale and pad: resize to fit, then pad to exact resolution (centered)
         w, h = resolution.split("x")
         filter_str = f"scale={resolution}:force_original_aspect_ratio=decrease,pad={w}:{h}:0:0:black"
-        
-        # Build drawtext filters using overlay renderer
-        overlay_renderer.set_enabled(config.get("overlay_enabled", False))
+
+        # Apply overlay renderer settings from config
+        overlay_renderer.set_enabled(config.get("overlay_enabled", True))
         overlay_config = config.get("overlay_config")
-        if overlay_config:
-            for k, v in (overlay_config.items() if isinstance(overlay_config, dict) else []):
-                if k in overlay_renderer.enabled_overlays:
-                    overlay_renderer.enabled_overlays[k] = v
-        drawtext_args = overlay_renderer.get_ffmpeg_drawtext_args(config)
-        if drawtext_args:
-            filter_str += "," + ",".join(drawtext_args)
+        if overlay_config and isinstance(overlay_config, dict):
+            overlay_renderer.configure_overlays(overlay_config)
 
         # Avatar image overlay (via FIFO pipe from overlay_renderer)
         avatar_enabled = overlay_renderer.enabled_overlays.get("avatar_overlay", False)
         fifo_path = overlay_renderer.get_overlay_fifo_path()
 
         if avatar_enabled and fifo_path and os.path.exists(fifo_path):
-            # Add overlay FIFO as second input + use filter_complex with overlay
-            cmd.extend(["-f", "image2pipe", "-vcodec", "png", "-i", fifo_path])
-            filter_str = f"[0:v]{filter_str}[base];[1:v]fps={min(config.get('fps', 30), 15)}[ovr];[base][ovr]overlay=0:0:format=auto:eof_action=pass:repeatlast=0[vout]"
+            overlay_fps = overlay_renderer.get_overlay_fps()
+            cmd.extend([
+                "-f", "image2pipe", "-vcodec", "png",
+                "-framerate", str(overlay_fps),
+                "-i", fifo_path
+            ])
+            # repeatlast=1: hold last frame when overlay thread drops frames
+            # eof_action=pass: continue base video if FIFO closes
+            filter_str = f"[0:v]{filter_str}[base];[1:v]overlay=0:0:format=auto:eof_action=pass:repeatlast=1[vout]"
             cmd.extend(["-filter_complex", filter_str, "-map", "[vout]", "-map", "0:a?"])
         else:
             cmd.extend(["-vf", filter_str])
@@ -409,19 +410,18 @@ class StreamEngine:
         # Start avatar overlay FIFO if enabled
         if overlay_renderer.enabled_overlays.get("avatar_overlay", False):
             w, h = config.get("resolution", "1080x1920").split("x")
-            overlay_renderer.start_overlay_fifo(int(w), int(h), min(config.get("fps", 30), 15))
+            overlay_renderer.start_overlay_fifo(int(w), int(h), 4)
             overlay_renderer.load_avatar_pool()
 
-            # Apply zodiac-specific settings from config
-            overlay_renderer._avatar_fall_duration = overlay_config.get("zodiac_fall_duration", 2.0) \
-                if overlay_config else 2.0
-            overlay_renderer._avatar_target_height_ratio = overlay_config.get("zodiac_target_height_ratio", 0.66) \
-                if overlay_config else 0.66
+            # Apply zodiac-specific settings from config (with fallback defaults)
+            zodiac_overlay_config = overlay_config if isinstance(overlay_config, dict) else {}
+            overlay_renderer._avatar_fall_duration = zodiac_overlay_config.get("zodiac_fall_duration", 1.5)
+            overlay_renderer._avatar_target_height_ratio = zodiac_overlay_config.get("zodiac_target_height_ratio", 0.66)
 
             # Seed a few test avatars so overlay is visible immediately even if TikTok live not connected
             for i in range(3):
                 overlay_renderer.add_viewer_avatar(f"seed_avatar_{i}")
-                time.sleep(0.5)
+                time.sleep(0.3)
 
         # Configure live client with TikTok credentials (integrated from comment_forwarder)
         tiktok_username = config.get("tiktok_username", "")
@@ -443,8 +443,8 @@ class StreamEngine:
         self.comment_processor_thread = threading.Thread(target=self._comment_monitor_loop, daemon=True)
         self.comment_processor_thread.start()
 
-        # Start preview process
-        self._start_preview(config)
+# Preview process removed — saves 12% CPU (single thumbnail snapshot is sufficient)
+        # self._start_preview(config)
 
         self.monitor_thread = threading.Thread(target=self._run_loop, daemon=True)
         self.monitor_thread.start()
@@ -506,13 +506,6 @@ class StreamEngine:
             pw, ph = min(360, int(w)), min(640, int(h))
             
             filter_str = f"scale={pw}:{ph}:force_original_aspect_ratio=decrease,pad={pw}:{ph}:0:0:black,fps=2"
-            # Chỉ build drawtext nếu overlay thực sự bật (tránh preview render stats khi đã tắt overlay)
-            if overlay_renderer.enabled and config.get("overlay_enabled", False):
-                drawtext_args = overlay_renderer.get_ffmpeg_drawtext_args(config)
-            else:
-                drawtext_args = []
-            if drawtext_args:
-                filter_str += "," + ",".join(drawtext_args)
             
             cmd = [
                 "ffmpeg", "-y",
@@ -683,7 +676,6 @@ class StreamEngine:
                     self.status = "STREAMING"
                     self.is_running = True
                     self.start_time = time.time()
-                    overlay_renderer.set_stream_start(self.start_time)
 
                 self.process = subprocess.Popen(
                     cmd,

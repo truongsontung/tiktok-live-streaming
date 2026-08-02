@@ -200,6 +200,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const configForm = document.getElementById('configForm');
     configForm.addEventListener('submit', async (e) => {
         e.preventDefault();
+        const avatarOverlay = document.getElementById('cfgAvatarOverlay').checked;
         const payload = {
             rtmp_url: document.getElementById('cfgRtmpUrl').value,
             stream_key: document.getElementById('cfgStreamKey').value,
@@ -208,7 +209,9 @@ document.addEventListener('DOMContentLoaded', () => {
             overlay_text: document.getElementById('cfgOverlayText').value,
             loop: document.getElementById('cfgLoop').checked,
             auto_reconnect: document.getElementById('cfgAutoReconnect').checked,
-            show_clock: document.getElementById('cfgShowClock').checked
+            show_clock: document.getElementById('cfgShowClock').checked,
+            overlay_enabled: true,
+            overlay_config: { avatar_overlay: avatarOverlay }
         };
 
         try {
@@ -222,6 +225,33 @@ document.addEventListener('DOMContentLoaded', () => {
             fetchTelemetry();
         } catch (err) {
             showToast(err.message, 'rose');
+        }
+    });
+
+    // Quick toggle avatar overlay (separate API call, no full config save needed)
+    document.getElementById('cfgAvatarOverlay').addEventListener('change', async function(e) {
+        const enabled = e.target.checked;
+        try {
+            const res = await fetch('api/overlay/config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ avatar_overlay: enabled })
+            });
+            const data = await res.json();
+            if (data.success) {
+                showToast(
+                    enabled
+                        ? 'Avatar overlay đã bật! (Restart stream để áp dụng)'
+                        : 'Avatar overlay đã tắt!',
+                    enabled ? 'emerald' : 'amber'
+                );
+            } else {
+                showToast(data.message || 'Lỗi cấu hình overlay', 'rose');
+                e.target.checked = !enabled;
+            }
+        } catch (err) {
+            showToast('Lỗi kết nối: ' + err.message, 'rose');
+            e.target.checked = !enabled;
         }
     });
 
@@ -403,6 +433,9 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('cfgLoop').checked = cfg.loop !== false;
             document.getElementById('cfgAutoReconnect').checked = cfg.auto_reconnect !== false;
             document.getElementById('cfgShowClock').checked = cfg.show_clock !== false;
+            // Load avatar overlay setting from overlay_config
+            const overlayCfg = cfg.overlay_config || {};
+            document.getElementById('cfgAvatarOverlay').checked = overlayCfg.avatar_overlay !== false;
         } catch (err) {
             console.error('Failed to load config:', err);
         }

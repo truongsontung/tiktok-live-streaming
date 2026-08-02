@@ -17,7 +17,7 @@ import random
 import threading
 import logging
 import fcntl
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -68,19 +68,24 @@ class OverlayRenderer:
         self.active_avatars: Dict[str, dict] = {}
         self.avatar_pool: List[str] = []
         self.zodiac_pool: List[dict] = []
-        self._avatar_display_size: int = 100
+        self._avatar_display_size: int = 80
         self._avatar_cache: Dict[str, Image.Image] = {}
         self._font_cache: Dict[str, Any] = {}
-        self._avatar_fall_duration: float = 2.0
+        self._avatar_fall_duration: float = 1.5
         self._avatar_target_height_ratio: float = 0.66
 
         # FIFO overlay pipe (feeds PNG frames to FFmpeg)
         self._overlay_fifo_path: Optional[str] = None
         self._overlay_thread: Optional[threading.Thread] = None
         self._overlay_stop_event: Optional[threading.Event] = None
-        self._overlay_fps: int = 10
+        self._overlay_fps: int = 4
         self._overlay_width: int = 0
         self._overlay_height: int = 0
+        self._empty_frame: Optional[bytes] = None
+        self._overlay_frame_size: Tuple[int, int] = (0, 0)
+
+        # Pre-allocated transparent frame buffer for fast empty-frame writes
+        self._transparent_canvas: Optional[Image.Image] = None
 
         self._init_overlay_files()
 
@@ -106,46 +111,28 @@ class OverlayRenderer:
             self.enabled = enabled
         logger.info(f"Overlay renderer {'enabled' if enabled else 'disabled'}")
 
+    def set_overlay_fps(self, fps: int):
+        """Set overlay rendering FPS (affects CPU usage)."""
+        with self._lock:
+            self._overlay_fps = max(1, min(fps, 10))
+        logger.info(f"Overlay FPS set to {self._overlay_fps}")
+
+    def get_overlay_fps(self) -> int:
+        """Return current overlay FPS."""
+        return self._overlay_fps
+
+    def set_avatar_display_size(self, size: int):
+        """Set the display size for avatar images."""
+        with self._lock:
+            self._avatar_display_size = max(40, min(size, 150))
+        logger.info(f"Avatar display size set to {self._avatar_display_size}")
+
     def configure_overlays(self, overlay_config: Dict[str, bool]):
         """Configure which overlays are enabled."""
         with self._lock:
             for key, value in overlay_config.items():
                 if key in self.enabled_overlays:
                     self.enabled_overlays[key] = value
-
-    def set_overlay_text(self, text: str):
-        """No-op: text overlay is disabled (only avatar overlay is used)."""
-        pass
-
-    def set_main_text(self, text: str):
-        """Alias for set_overlay_text."""
-        self.set_overlay_text(text)
-
-    def set_enabled_overlays(self, enabled: bool):
-        """Enable or disable all overlay types at once."""
-        with self._lock:
-            for k in self.enabled_overlays:
-                self.enabled_overlays[k] = enabled
-
-    def add_welcome_message(self, username: str):
-        """No-op: welcome message overlay is disabled."""
-        pass
-
-    def add_comment(self, username: str, comment: str, is_ai_response: bool = False, ttl: float = 15.0):
-        """No-op: comment overlay is disabled."""
-        pass
-
-    def set_viewer_count(self, count: int, peak: int = 0):
-        """No-op: viewer count is not displayed (only avatar overlay is used)."""
-        pass
-
-    def set_stream_start(self, start_time: float):
-        """No-op: stream start time is not used (no uptime display on video)."""
-        pass
-
-    def get_ffmpeg_drawtext_args(self, config: Dict[str, Any]) -> List[str]:
-        """Generate FFmpeg drawtext arguments. Returns empty list — no text on video."""
-        return []
 
     def get_telemetry(self) -> Dict[str, Any]:
         """Get overlay renderer telemetry."""
@@ -156,17 +143,23 @@ class OverlayRenderer:
                 "active_avatars": len(self.active_avatars),
                 "avatar_pool_count": len(self.avatar_pool),
                 "zodiac_pool_count": len(self.zodiac_pool),
+                "overlay_fps": self._overlay_fps,
+                "avatar_display_size": self._avatar_display_size,
+                "overlay_frame_size": self._overlay_frame_size,
+                "empty_frame_cached": self._empty_frame is not None,
             }
 
     # ==================== AVATAR OVERLAY SYSTEM ====================
 
     def load_avatar_pool(self, directory: str = None):
-        """Load avatar images from a directory for random assignment."""
+        """Load avatar images from a directory for random assignment.
+        Pre-loads all avatar images into cache to avoid first-use latency spikes."""
         if directory is None:
             directory = AVATAR_DIR
         with self._lock:
             self.avatar_pool = []
             self.zodiac_pool = []
+            self._avatar_cache.clear()
             if os.path.exists(directory):
                 for f in sorted(os.listdir(directory)):
                     if f.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
@@ -186,7 +179,20 @@ class OverlayRenderer:
                                     "animal": zodiac_info["animal"],
                                     "num": num,
                                 })
-        logger.info(f"Loaded {len(self.avatar_pool)} avatars ({len(self.zodiac_pool)} zodiac) from {directory}")
+        # Pre-load all avatar images into cache (outside lock to avoid blocking)
+        loaded = 0
+        for fpath in self.avatar_pool:
+            try:
+                img = Image.open(fpath).convert('RGBA')
+                img.thumbnail((self._avatar_display_size, self._avatar_display_size), Image.LANCZOS)
+                canvas = Image.new('RGBA', (self._avatar_display_size, self._avatar_display_size), (0, 0, 0, 0))
+                canvas.paste(img, ((self._avatar_display_size - img.width) // 2,
+                                  (self._avatar_display_size - img.height) // 2), img)
+                self._avatar_cache[fpath] = canvas
+                loaded += 1
+            except Exception as e:
+                logger.warning(f"Pre-load failed for {os.path.basename(fpath)}: {e}")
+        logger.info(f"Loaded {len(self.avatar_pool)} avatars ({len(self.zodiac_pool)} zodiac, {loaded} cached) from {directory}")
 
     def _assign_random_zodiac(self) -> Optional[dict]:
         """Randomly select a zodiac animal from the pool."""
@@ -332,11 +338,14 @@ class OverlayRenderer:
         with self._lock:
             self.active_avatars.clear()
 
-    def start_overlay_fifo(self, width: int, height: int, fps: int = 10):
+    def start_overlay_fifo(self, width: int, height: int, fps: int = 4):
         """Create FIFO pipe and start overlay generation thread."""
-        self._overlay_width = width
-        self._overlay_height = height
-        self._overlay_fps = fps
+        with self._lock:
+            self._overlay_width = width
+            self._overlay_height = height
+            self._overlay_fps = fps
+            self._overlay_frame_size = (width, height)
+
         self._overlay_fifo_path = os.path.join(OVERLAY_DIR, "avatar_overlay.fifo")
         if os.path.exists(self._overlay_fifo_path) or os.path.islink(self._overlay_fifo_path):
             try:
@@ -344,7 +353,18 @@ class OverlayRenderer:
             except Exception:
                 pass
         os.mkfifo(self._overlay_fifo_path)
+
+        # Pre-encode a transparent PNG frame once (reused when no avatars active)
+        with self._lock:
+            self._transparent_canvas = Image.new('RGBA', (width, height), (0, 0, 0, 0))
+            buf = io.BytesIO()
+            self._transparent_canvas.save(buf, format='PNG', compress_level=1)
+            self._empty_frame = buf.getvalue()
+            buf.close()
+
         logger.info(f"Created overlay FIFO: {self._overlay_fifo_path}")
+        logger.info(f"Pre-encoded empty frame: {len(self._empty_frame)} bytes ({width}x{height})")
+
         self._overlay_stop_event = threading.Event()
         self._overlay_thread = threading.Thread(target=self._overlay_thread_main, daemon=True)
         self._overlay_thread.start()
@@ -369,39 +389,59 @@ class OverlayRenderer:
         return self._overlay_fifo_path
 
     def _overlay_thread_main(self):
-        """Background thread: generate overlay PNG frames and write to FIFO."""
+        """Background thread: generate overlay PNG frames and write to FIFO.
+        
+        Uses non-blocking FIFO writes — drops frames when consumer (FFmpeg) is slow,
+        preventing cascade stalls on the main video stream.
+        """
         frame_interval = 1.0 / self._overlay_fps
+        next_frame_time = time.time()
+        fifo = None
+        fd = None
         while not self._overlay_stop_event.is_set():
             try:
                 fd = os.open(self._overlay_fifo_path, os.O_WRONLY | os.O_NONBLOCK)
-                flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-                fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
-                fifo = os.fdopen(fd, 'wb')
+                fifo = os.fdopen(fd, 'wb', buffering=0)
                 logger.info("Overlay FIFO connected to FFmpeg")
                 while not self._overlay_stop_event.is_set():
                     frame = self._render_overlay_frame()
                     if frame:
-                        fifo.write(frame)
-                        fifo.flush()
-                    time.sleep(frame_interval)
-                fifo.close()
+                        try:
+                            os.write(fd, frame)
+                        except BlockingIOError:
+                            pass  # FIFO full — drop frame, FFmpeg holds last frame
+                        except BrokenPipeError:
+                            break  # Reader closed — reconnect
+                    next_frame_time += frame_interval
+                    sleep_time = next_frame_time - time.time()
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
+                    else:
+                        next_frame_time = time.time()
+                try: fifo.close()
+                except Exception: pass
+                fd = None
+                fifo = None
                 break
             except OSError as e:
                 if e.errno == errno.ENXIO:
-                    time.sleep(0.2)
+                    time.sleep(0.1)
                 elif e.errno in (errno.EPIPE, errno.EBADF):
                     logger.debug("Overlay FIFO read end closed, reconnecting...")
-                    try:
-                        fifo.close()
-                    except Exception:
-                        pass
-                    time.sleep(0.5)
+                    try: fifo.close()
+                    except Exception: pass
+                    fd = None
+                    fifo = None
+                    time.sleep(0.2)
                 else:
                     logger.warning(f"Overlay thread FIFO error: {e}")
-                    time.sleep(0.5)
+                    time.sleep(0.3)
             except Exception as e:
                 logger.warning(f"Overlay thread error: {e}")
                 time.sleep(0.5)
+        if fifo:
+            try: fifo.close()
+            except Exception: pass
 
     def _render_overlay_frame(self) -> Optional[bytes]:
         """Render a single overlay frame with avatar images, names, and animations.
@@ -410,11 +450,11 @@ class OverlayRenderer:
         - After landing, bounce at 2Hz in sync with music rhythm.
         - Zodiac name + animal name displayed below each avatar.
         - Gift animation: scale + golden glow.
+        
+        Returns pre-encoded transparent PNG immediately when no avatars active.
         """
         if self._overlay_width == 0 or self._overlay_height == 0:
             return None
-        img = Image.new('RGBA', (self._overlay_width, self._overlay_height), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(img)
         current_time = time.time()
         with self._lock:
             expired = [u for u, info in self.active_avatars.items()
@@ -423,9 +463,17 @@ class OverlayRenderer:
                 del self.active_avatars[u]
             avatars = list(self.active_avatars.items())
         if not avatars:
+            if self._empty_frame:
+                return self._empty_frame
+            # Fallback: generate transparent frame (shouldn't happen)
             buf = io.BytesIO()
-            img.save(buf, format='PNG', compress_level=1)
+            Image.new('RGBA', (self._overlay_width, self._overlay_height), (0, 0, 0, 0)).save(
+                buf, format='PNG', compress_level=1)
             return buf.getvalue()
+
+        # Create fresh canvas for avatars
+        img = Image.new('RGBA', (self._overlay_width, self._overlay_height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
         avatar_size = self._avatar_display_size
         for username, info in avatars:
             x = info.get("x_pos", 100)
