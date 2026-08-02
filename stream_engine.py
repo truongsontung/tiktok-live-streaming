@@ -456,9 +456,7 @@ class StreamEngine:
         self.comment_processor_thread = threading.Thread(target=self._comment_monitor_loop, daemon=True)
         self.comment_processor_thread.start()
 
-        # Start lightweight preview (snapshot to /tmp/preview.jpg for dashboard)
-        self._start_preview(config)
-
+        # Preview will be started in _run_loop AFTER playlist.txt is written
         self.monitor_thread = threading.Thread(target=self._run_loop, daemon=True)
         self.monitor_thread.start()
 
@@ -692,11 +690,13 @@ class StreamEngine:
                 try: os.remove(tmp)
                 except: pass
 
-            # Restart preview after playlist rebuild
-            self._start_preview(config)
-
             try:
+                # build_ffmpeg_command writes playlist.txt via _write_playlist
                 cmd = self.build_ffmpeg_command(config)
+
+                # Start preview AFTER playlist.txt is written
+                self._start_preview(config)
+
                 logger.info(f"Launching FFmpeg Stream process (Target: {config.get('rtmp_url')})...")
 
                 with self.lock:
