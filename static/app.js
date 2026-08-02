@@ -53,9 +53,7 @@ document.addEventListener('DOMContentLoaded', () => {
         'dashboard': 'Bảng Điều Khiển Stream',
         'config': 'Cấu Hình Luồng Stream',
         'media': 'Quản Lý Video Playlist',
-        'logs': 'Nhật Ký FFmpeg Core',
-        'ai': 'AI Trợ Lý Live',
-        'live': 'Live Comment Monitoring'
+        'logs': 'Nhật Ký FFmpeg Core'
     };
 
     navItems.forEach(item => {
@@ -80,10 +78,8 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             if (targetTab === 'config') loadConfig();
-            if (targetTab === 'media') { loadMediaList().then(() => setTimeout(loadPlaylist, 200)); }
+            if (targetTab === 'media') loadMediaList();
             if (targetTab === 'logs') loadLogs();
-            if (targetTab === 'ai') loadAIConfig();
-            if (targetTab === 'live') loadLiveConfig();
 
             window.scrollTo({ top: 0, behavior: 'smooth' });
         });
@@ -215,12 +211,6 @@ document.addEventListener('DOMContentLoaded', () => {
             show_clock: document.getElementById('cfgShowClock').checked
         };
 
-        // Also save tiktok username if filled
-        const liveUser = document.getElementById('liveUsername');
-        if (liveUser && liveUser.value.trim()) {
-            payload.tiktok_username = liveUser.value.trim().replace('@', '');
-        }
-
         try {
             const res = await fetch('api/config', {
                 method: 'POST',
@@ -235,57 +225,89 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // File Upload
+    // File Upload (Chunked for large file / mobile compatibility)
     let uploadActive = false;
+    const CHUNK_SIZE = 16 * 1024 * 1024; // 16MB per chunk
     const fileUploadInput = document.getElementById('fileUploadInput');
-    fileUploadInput.addEventListener('change', (e) => {
+    fileUploadInput.addEventListener('change', async (e) => {
         const file = e.target.files[0];
         if (!file) return;
 
         uploadActive = true;
-        const formData = new FormData();
-        formData.append('file', file);
+        const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+        let uploadedBytes = 0;
+        let activeToast = showToast(`Đang tải lên ${file.name}... 0%`, 'cyan');
 
-        let progressToast = showToast(`Đang tải lên ${file.name}... 0%`, 'cyan');
+        for (let i = 0; i < totalChunks; i++) {
+            const start = i * CHUNK_SIZE;
+            const end = Math.min(start + CHUNK_SIZE, file.size);
+            const chunk = file.slice(start, end);
 
-        const xhr = new XMLHttpRequest();
-        xhr.open('POST', 'api/media/upload');
-
-        xhr.upload.onprogress = (event) => {
-            if (event.lengthComputable) {
-                const percent = Math.round((event.loaded / event.total) * 100);
-                progressToast = showToast(`Đang tải lên ${file.name}: ${percent}%`, 'cyan');
-            }
-        };
-
-        xhr.onload = () => {
-            uploadActive = false;
-            fileUploadInput.value = '';
-            clearActiveToast();
-            if (xhr.status === 200) {
-                const data = JSON.parse(xhr.responseText);
-                if (data.converted) {
-                    showToast(`Tải lên ${file.name} thành công! Đã convert H.264`, 'emerald');
-                } else {
-                    showToast(`Tải lên ${file.name} thành công! Đang convert nền...`, 'emerald');
+            let retryCount = 0;
+            let success = false;
+            while (retryCount < 3 && !success) {
+                try {
+                    await uploadChunkXHR(chunk, file.name, i, totalChunks);
+                    uploadedBytes += (end - start);
+                    success = true;
+                    const percent = Math.round((uploadedBytes / file.size) * 100);
+                    activeToast = showToast(`Đang tải lên ${file.name}: ${percent}%`, 'cyan');
+                } catch (err) {
+                    retryCount++;
+                    if (retryCount >= 3) {
+                        uploadActive = false;
+                        fileUploadInput.value = '';
+                        clearActiveToast();
+                        showToast(`Lỗi tải chunk ${i + 1}/${totalChunks}: ${err.message}. Vui lòng thử lại.`, 'rose');
+                        return;
+                    }
+                    await new Promise(r => setTimeout(r, 1000));
                 }
-                loadMediaList();
-                setTimeout(() => { loadMediaList(); if (typeof loadPlaylist === 'function') loadPlaylist(); }, 5000);
-            } else if (xhr.status === 413) {
-                showToast(`File ${file.name} quá lớn (max 600MB)!`, 'rose');
-            } else {
-                showToast(`Lỗi tải lên (${xhr.status}): ${xhr.responseText.slice(0,100)}`, 'rose');
             }
-        };
+        }
 
-        xhr.onerror = () => {
-            uploadActive = false;
-            clearActiveToast();
-            showToast(`Lỗi kết nối khi tải ${file.name}`, 'rose');
-        };
-
-        xhr.send(formData);
+        uploadActive = false;
+        fileUploadInput.value = '';
+        clearActiveToast();
+        showToast(`Tải lên ${file.name} thành công!`, 'emerald');
+        loadMediaList();
+        setTimeout(() => loadMediaList(), 5000);
     });
+
+    function uploadChunkXHR(chunk, filename, chunkIndex, totalChunks) {
+        return new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            const url = `api/media/upload-chunk?filename=${encodeURIComponent(filename)}&chunkIndex=${chunkIndex}&totalChunks=${totalChunks}`;
+            xhr.open('POST', url);
+
+            xhr.upload.onprogress = (event) => {
+                if (event.lengthComputable) {
+                    const overall = Math.round(((chunkIndex * CHUNK_SIZE + event.loaded) / (totalChunks * CHUNK_SIZE)) * 100);
+                    showToast(`Đang tải lên ${filename}: ${Math.min(overall, 100)}%`, 'cyan');
+                }
+            };
+
+            xhr.timeout = 600000; // 10 minutes per chunk
+            xhr.onload = () => {
+                if (xhr.status === 200) {
+                    let data;
+                    try { data = JSON.parse(xhr.responseText); } catch (e) {}
+                    resolve(data);
+                } else if (xhr.status === 413) {
+                    reject(new Error('File quá lớn (max 10GB)'));
+                } else if (xhr.status === 0) {
+                    reject(new Error('Kết nối bị gián đoạn'));
+                } else {
+                    let detail = 'Không xác định';
+                    try { detail = JSON.parse(xhr.responseText).detail; } catch (e) {}
+                    reject(new Error(`Lỗi (${xhr.status}): ${detail}`));
+                }
+            };
+            xhr.onerror = () => reject(new Error('Lỗi kết nối'));
+            xhr.ontimeout = () => reject(new Error('Quá thời gian'));
+            xhr.send(chunk);
+        });
+    }
 
     // Prevent accidental navigation during upload
     window.addEventListener('beforeunload', (e) => {
@@ -430,46 +452,103 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    // ---- Media Library with Thumbnails ----
     async function loadMediaList() {
         const container = document.getElementById('mediaListContainer');
         try {
+            await loadPlaylist();
             const res = await fetch('api/media');
             const data = await res.json();
 
             if (!data.files || data.files.length === 0) {
-                container.innerHTML = `<div class="empty-state">Chưa có video nào. Hệ thống sẽ tự động phát Video Test Pattern mặc định nếu bạn nhấn Start Live.</div>`;
+                container.innerHTML = `<div class="empty-state">Chưa có video nào. Upload video hoặc thêm từ URL để bắt đầu.</div>`;
                 return;
             }
 
-            container.innerHTML = `<div class="playlist-controls" style="margin-bottom:12px;display:flex;gap:8px;align-items:center;">
-                <button class="btn btn-emerald btn-sm" onclick="savePlaylist()">
-                    <i class="fa-solid fa-save"></i> Lưu Playlist
-                </button>
-                <span class="text-muted" style="font-size:12px;" id="playlistCount">0 video đã chọn</span>
-            </div>` + data.files.map(f => `
-                <div class="media-item">
-                    <div class="media-name" onclick="togglePlaylist('${f.name}')" style="cursor:pointer;">
-                        <i class="fa-solid fa-file-video text-emerald"></i>
-                        <input type="checkbox" class="playlist-checkbox" value="${f.name}" style="margin-left:8px;" onchange="togglePlaylist('${f.name}')">
-                        <span>${f.name}</span>
-                        <small class="text-muted">(${f.size_mb} MB)</small>
-                    </div>
-                    <div class="media-actions">
-                        <button class="btn btn-amber btn-sm" onclick="convertMedia('${f.name}')" title="Convert to H.264">
-                            <i class="fa-solid fa-gears"></i>
-                        </button>
-                        <button class="btn btn-rose btn-sm" onclick="deleteMedia('${f.name}')">
-                            <i class="fa-solid fa-trash"></i> Xóa
-                        </button>
-                    </div>
-                </div>
-            `).join('');
-            updatePlaylistCount();
-            // Load saved playlist after rendering
-            setTimeout(loadPlaylist, 100);
+            window._mediaFiles = data.files;
+            renderMediaList();
         } catch (err) {
             container.innerHTML = `<div class="empty-state">Lỗi nạp danh sách video: ${err.message}</div>`;
         }
+    }
+
+    function renderMediaList() {
+        const container = document.getElementById('mediaListContainer');
+        const data = { files: window._mediaFiles || [] };
+
+        if (!data.files || data.files.length === 0) {
+            container.innerHTML = `<div class="empty-state">Chưa có video nào. Upload video hoặc thêm từ URL để bắt đầu.</div>`;
+            return;
+        }
+
+        let html = `<div class="media-grid">`;
+        for (const f of data.files) {
+            const duration = f.duration ? formatDuration(f.duration) : '--:--';
+            const thumb = f.thumb_url
+                ? `<img src="${f.thumb_url}" class="media-thumb" loading="lazy">`
+                : `<div class="media-thumb-placeholder"><i class="fa-solid fa-film"></i></div>`;
+            const inPlaylist = window._currentPlaylist && window._currentPlaylist.includes(f.name);
+
+            html += `
+            <div class="media-card" data-filename="${f.name}">
+                ${thumb}
+                <div class="media-info">
+                    <span class="media-name" title="${f.name}">${f.name}</span>
+                    <span class="media-meta">${f.size_mb} MB • ${duration}</span>
+                </div>
+                <div class="media-actions-row">
+                    <label class="checkbox-label media-checkbox" title="Chọn để thêm vào playlist">
+                        <input type="checkbox" onchange="toggleMediaInPlaylist('${f.name}')" ${inPlaylist ? 'checked' : ''}>
+                    </label>
+                    <button class="btn-icon btn-amber" onclick="convertMedia('${f.name}')" title="Convert to H.264">
+                        <i class="fa-solid fa-gears"></i>
+                    </button>
+                    <button class="btn-icon btn-rose" onclick="deleteMedia('${f.name}')" title="Xóa">
+                        <i class="fa-solid fa-trash"></i>
+                    </button>
+                </div>
+            </div>`;
+        }
+        html += `</div>`;
+
+        // Playlist order display with up/down reorder buttons
+        html += `<div class="playlist-section">
+            <div class="playlist-header">
+                <h4><i class="fa-solid fa-list-order"></i> Thứ Tự Phát Playlist</h4>
+                <button class="btn btn-emerald btn-sm" onclick="savePlaylist()">
+                    <i class="fa-solid fa-save"></i> Lưu Playlist
+                </button>
+            </div>
+            <ul class="playlist-list">`;
+
+        if (window._currentPlaylist && window._currentPlaylist.length) {
+            window._currentPlaylist.forEach((name, idx) => {
+                const fileInfo = data.files.find(f => f.name === name);
+                const dur = fileInfo && fileInfo.duration ? formatDuration(fileInfo.duration) : '';
+                const canUp = idx > 0;
+                const canDown = idx < window._currentPlaylist.length - 1;
+                html += `<li class="playlist-item">
+                    <span class="playlist-order">${idx + 1}</span>
+                    <span class="playlist-name">${name}</span>
+                    <span class="playlist-dur">${dur}</span>
+                    <div class="playlist-move-btns">
+                        <button class="btn-icon btn-cyan btn-xs" onclick="movePlaylistUp(${idx})" title="Lên" ${canUp ? '' : 'disabled'}><i class="fa-solid fa-up-long"></i></button>
+                        <button class="btn-icon btn-cyan btn-xs" onclick="movePlaylistDown(${idx})" title="Xuống" ${canDown ? '' : 'disabled'}><i class="fa-solid fa-down-long"></i></button>
+                    </div>
+                </li>`;
+            });
+        } else {
+            html += `<li class="empty-state-sm">Chưa có video trong playlist. Chọn checkbox để thêm.</li>`;
+        }
+        html += `</ul></div>`;
+
+        container.innerHTML = html;
+    }
+
+    function formatDuration(seconds) {
+        const m = Math.floor(seconds / 60);
+        const s = Math.floor(seconds % 60);
+        return `${m}:${String(s).padStart(2, '0')}`;
     }
 
     window.deleteMedia = async function(fname) {
@@ -486,12 +565,12 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     window.convertMedia = async function(fname) {
-        showToast(`Đang convert ${fname} → H.264...`, 'amber');
+        showToast(`Đang convert ${fname}...`, 'amber');
         try {
             const res = await fetch(`api/media/${encodeURIComponent(fname)}/convert`, { method: 'POST' });
             const data = await res.json();
             if (data.success) {
-                showToast(data.already_h264 ? 'Đã là H.264' : 'Convert hoàn tất!', 'emerald');
+                showToast(data.already_compatible ? 'Đã đúng định dạng' : 'Convert hoàn tất!', 'emerald');
             } else {
                 showToast(data.error || 'Convert lỗi', 'rose');
             }
@@ -500,49 +579,62 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
-    window.togglePlaylist = function(fname) {
-        const cb = document.querySelector(`input[value="${fname}"]`);
-        if (cb) cb.checked = !cb.checked;
-        updatePlaylistCount();
-    };
+    // Track current playlist and media files
+    window._currentPlaylist = [];
+    window._mediaFiles = [];
 
-    function updatePlaylistCount() {
-        const checked = document.querySelectorAll('.playlist-checkbox:checked');
-        const countEl = document.getElementById('playlistCount');
-        if (countEl) countEl.textContent = `${checked.length} video đã chọn`;
-    }
-
-    window.savePlaylist = async function() {
-        const checked = document.querySelectorAll('.playlist-checkbox:checked');
-        const playlist = Array.from(checked).map(cb => cb.value);
-        try {
-            const res = await fetch('api/media/playlist', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({playlist: playlist})
-            });
-            const data = await res.json();
-            if (data.success) {
-                showToast(`Đã lưu ${playlist.length} video. Dừng stream và bật lại để áp dụng!`, 'amber');
-            }
-        } catch (err) {
-            showToast(err.message, 'rose');
-        }
-    };
-
-    // Load saved playlist on media tab
+    // Load saved playlist
     async function loadPlaylist() {
         try {
             const res = await fetch('api/media/playlist');
             const data = await res.json();
-            if (data.playlist) {
-                data.playlist.forEach(fname => {
-                    const cb = document.querySelector(`input[value="${fname}"]`);
-                    if (cb) cb.checked = true;
-                });
-                updatePlaylistCount();
+            window._currentPlaylist = data.playlist || [];
+        } catch (err) {
+            window._currentPlaylist = [];
+        }
+    }
+
+    // Toggle video in playlist (updates local state then re-renders)
+    window.toggleMediaInPlaylist = function(fname) {
+        const idx = window._currentPlaylist.indexOf(fname);
+        if (idx >= 0) {
+            window._currentPlaylist.splice(idx, 1);
+        } else {
+            window._currentPlaylist.push(fname);
+        }
+        renderMediaList();
+    }
+
+    window.movePlaylistUp = function(idx) {
+        if (idx <= 0) return;
+        const tmp = window._currentPlaylist[idx];
+        window._currentPlaylist[idx] = window._currentPlaylist[idx - 1];
+        window._currentPlaylist[idx - 1] = tmp;
+        renderMediaList();
+    }
+
+    window.movePlaylistDown = function(idx) {
+        if (idx >= window._currentPlaylist.length - 1) return;
+        const tmp = window._currentPlaylist[idx];
+        window._currentPlaylist[idx] = window._currentPlaylist[idx + 1];
+        window._currentPlaylist[idx + 1] = tmp;
+        renderMediaList();
+    }
+
+    window.savePlaylist = async function() {
+        try {
+            const res = await fetch('api/media/playlist', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({playlist: window._currentPlaylist})
+            });
+            const data = await res.json();
+            if (data.success) {
+                showToast(`Đã lưu ${window._currentPlaylist.length} video. Dừng stream và bật lại để áp dụng!`, 'amber');
             }
-        } catch (err) {}
+        } catch (err) {
+            showToast(err.message, 'rose');
+        }
     }
 
     async function loadLogs() {
@@ -563,196 +655,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     document.getElementById('btnRefreshLogs')?.addEventListener('click', loadLogs);
-
-    // ===== AI ENGINE FUNCTIONS =====
-
-    // AI Config Form
-    const aiConfigForm = document.getElementById('aiConfigForm');
-    if (aiConfigForm) {
-        const presetEl = document.getElementById('aiModelPreset');
-        const customWrap = document.getElementById('aiModelCustomWrap');
-        if (presetEl) {
-            presetEl.addEventListener('change', () => {
-                if (presetEl.value === 'custom') {
-                    customWrap.style.display = 'block';
-                } else {
-                    customWrap.style.display = 'none';
-                }
-            });
-        }
-        aiConfigForm.addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const preset = document.getElementById('aiModelPreset').value;
-            let model = document.getElementById('aiModel').value;
-            if (preset !== 'custom') model = preset;
-            const payload = {
-                enabled: document.getElementById('aiEnabled').checked,
-                api_key: document.getElementById('aiApiKey').value,
-                model: model,
-                base_url: document.getElementById('aiBaseUrl').value.trim() || null,
-                persona: document.getElementById('aiPersona').value,
-                custom_system_prompt: document.getElementById('aiCustomPrompt').value.trim() || null
-            };
-
-            try {
-                const res = await fetch('api/ai/configure', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                });
-                const data = await res.json();
-                if (!res.ok) throw new Error(data.detail || 'Lỗi cấu hình AI');
-                showToast('AI engine đã được cấu hình!', 'emerald');
-                fetchTelemetry();
-            } catch (err) {
-                showToast(err.message, 'rose');
-            }
-        });
-    }
-
-    async function loadAIConfig() {
-        try {
-            const res = await fetch('api/ai/status');
-            const data = await res.json();
-            document.getElementById('aiEnabled').checked = data.enabled;
-            document.getElementById('aiBaseUrl').value = data.base_url || '';
-            const presetEl = document.getElementById('aiModelPreset');
-            const customWrap = document.getElementById('aiModelCustomWrap');
-            const knownPresets = ['gpt-4o-mini', 'gpt-4o', 'gpt-3.5-turbo'];
-            if (data.model && knownPresets.includes(data.model)) {
-                presetEl.value = data.model;
-                customWrap.style.display = 'none';
-            } else {
-                presetEl.value = 'custom';
-                customWrap.style.display = 'block';
-                document.getElementById('aiModel').value = data.model;
-            }
-            if (document.getElementById('aiCustomPrompt')) {
-                document.getElementById('aiCustomPrompt').value = data.custom_system_prompt || '';
-            }
-            if (document.getElementById('aiPersona')) {
-                document.getElementById('aiPersona').value = data.persona || 'assistant';
-            }
-        } catch (err) {
-            console.error('Failed to load AI config:', err);
-        }
-
-        // Load AI response cache
-        try {
-            const res = await fetch('api/ai/responses');
-            const data = await res.json();
-            const logEl = document.getElementById('aiResponseLog');
-            if (logEl) {
-                if (!data.responses || data.responses.length === 0) {
-                    logEl.innerHTML = '<div class="log-line text-muted">Chưa có phản hồi AI nào.</div>';
-                } else {
-                    logEl.innerHTML = data.responses.map(r => `
-                        <div class="log-line">
-                            <span class="text-cyan">[${r.timestamp}]</span>
-                            <span class="text-emerald">${escapeHtml(r.username)}:</span> ${escapeHtml(r.comment)}
-                            <br><span class="text-amber">🤖 AI:</span> ${escapeHtml(r.response)}
-                        </div>
-                    `).join('');
-                    logEl.scrollTop = logEl.scrollHeight;
-                }
-            }
-        } catch (err) {
-            console.error('Failed to load AI responses:', err);
-        }
-    }
-
-    document.getElementById('btnClearAICache')?.addEventListener('click', async () => {
-        if (!confirm('Xóa toàn bộ lịch sử phản hồi AI?')) return;
-        try {
-            await fetch('api/ai/cache', { method: 'DELETE' });
-            showToast('Đã xóa lịch sử AI', 'emerald');
-            loadAIConfig();
-        } catch (err) {
-            showToast(err.message, 'rose');
-        }
-    });
-
-    // ===== LIVE CLIENT FUNCTIONS =====
-
-    const liveConnectForm = document.getElementById('liveConnectForm');
-    if (liveConnectForm) {
-        liveConnectForm.addEventListener('submit', async (e) => {
-            e.preventDefault();
-            let username = document.getElementById('liveUsername').value.trim();
-            if (username.startsWith('@')) username = username.slice(1);
-            
-            if (!username) {
-                showToast('Nhập username TikTok!', 'rose');
-                return;
-            }
-
-            const btnConnect = document.getElementById('btnLiveConnect');
-            btnConnect.disabled = true;
-            btnConnect.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Đang kết nối...';
-
-            try {
-                const res = await fetch('api/live/connect', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                     body: JSON.stringify({
-                         username: username,
-                         web_proxy: document.getElementById('liveWebProxy') ? document.getElementById('liveWebProxy').value.trim() || null : null
-                     })
-                });
-                const data = await res.json();
-                showToast(data.message || 'Kết nối live thành công!', data.success ? 'emerald' : 'rose');
-                if (data.success) {
-                    document.getElementById('liveStatsGrid').style.display = 'block';
-                }
-                fetchTelemetry();
-            } catch (err) {
-                showToast(err.message, 'rose');
-            } finally {
-                btnConnect.disabled = false;
-                btnConnect.innerHTML = '<i class="fa-solid fa-plug-waveform"></i> KẾT NỐI TIKTOK LIVE';
-            }
-        });
-    }
-
-    async function loadLiveConfig() {
-        try {
-            const res = await fetch('api/live/status');
-            const data = await res.json();
-            
-            const statsGrid = document.getElementById('liveStatsGrid');
-            if (statsGrid) {
-                statsGrid.style.display = data.connected ? 'grid' : 'none';
-            }
-
-            // Load comments
-            const res2 = await fetch('api/live/comments?count=50');
-            const data2 = await res2.json();
-            const feed = document.getElementById('liveCommentFeed');
-            if (feed) {
-                if (!data2.comments || data2.comments.length === 0) {
-                    feed.innerHTML = '<div class="comment-item text-muted">Chưa có bình luận nào...</div>';
-                } else {
-                    feed.innerHTML = data2.comments.map(c => `
-                        <div class="comment-item">
-                            <span class="comment-time">${c.timestamp}</span>
-                            <span class="comment-user">${escapeHtml(c.user)}:</span>
-                            <span class="comment-text">${escapeHtml(c.comment)}</span>
-                        </div>
-                    `).join('');
-                    feed.scrollTop = feed.scrollHeight;
-                }
-            }
-        } catch (err) {
-            console.error('Failed to load live data:', err);
-        }
-    }
-
-    document.getElementById('btnClearComments')?.addEventListener('click', async () => {
-        const feed = document.getElementById('liveCommentFeed');
-        if (feed) {
-            feed.innerHTML = '<div class="comment-item text-muted">Đã xóa danh sách bình luận.</div>';
-        }
-    });
 
     // ===== HELPERS =====
     function formatSeconds(secs) {
@@ -793,14 +695,6 @@ document.addEventListener('DOMContentLoaded', () => {
             activeToast = null;
         }
     }
-
-    // Update Simulated Clock
-    setInterval(() => {
-        const now = new Date();
-        const timeStr = now.toTimeString().split(' ')[0];
-        const clockEl = document.getElementById('screenClock');
-        if (clockEl) clockEl.textContent = timeStr;
-    }, 1000);
 
     // Preview image refresh (when streaming)
     setInterval(() => {

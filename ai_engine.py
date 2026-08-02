@@ -53,21 +53,6 @@ class AIResponseEngine:
                 "Thấy comment nhiều rồi, mình sẽ giải thích chi tiết",
             ]
         },
-        "salesperson": {
-            "name": "salesperson",
-            "system_prompt": """Bạn là một AI chuyên gia bán hàng đang live stream bán hàng. Hãy thú vị, thuyết phục, và tạo cảm giác khẩn cấp.
-- Nhấn mạnh lợi ích sản phẩm
-- Tạo cảm giác giới hạn thời gian
-- Khuyến khích đặt hàng ngay
-- Trả lời dưới 200 ký tự
-- Dùng emoji 🎁 🔥 💰""",
-            "default_responses": [
-                "Sản phẩm hot số lượng có hạn đây mọi người ơi 🔥",
-                "Giá tốt sốc được không các bạn?",
-                "Chỉ hôm nay giảm 20% đặc biệt cho AE nha!",
-                "Còn ít hàng, comment ngay để mình ghi tên bạn!",
-            ]
-        },
         "assistant": {
             "name": "assistant",
             "system_prompt": """Bạn là một AI trợ lý thông minh đang live stream, trò chuyện với người xem. Hãy tự nhiên, thân thiện, và tạo sự tương tác.
@@ -179,28 +164,16 @@ class AIResponseEngine:
         """Get the current persona configuration."""
         return self.PERSONAS.get(self.persona, self.PERSONAS["assistant"])
 
-    def _build_system_prompt(self, product_tag: Optional[str] = None) -> str:
+    def _build_system_prompt(self) -> str:
         """Build the system prompt combining live context + persona + custom."""
         persona_config = self._get_persona_config()
         parts = [self.LIVE_CONTEXT_PROMPT, persona_config["system_prompt"]]
         if self.custom_system_prompt:
             parts.append(self.custom_system_prompt)
-        if product_tag:
-            parts.append(
-                f"## Sản phẩm đang live\n"
-                f"Video live stream hiện đang giới thiệu sản phẩm: {product_tag}.\n"
-                f"Hãy trả lời ngắn gọn, tự nhiên, nhấn mạnh lợi ích/giá của {product_tag}.\n\n"
-                f"**QUAN TRỌNG - QUY TẮC CỘNG ĐỒNG TIKTOK**:\n"
-                f"- KHÔNG BAO GIỜ dán/copy đường link URL chữ (https://...) vào phản hồi.\n"
-                f"- Nếu khách hỏi mua hàng, chỉ nêu lợi ích sản phẩm + gợi nhắc nhấn vào "
-                f"**nút giỏ hàng màu vàng (nút liên kết sản phẩm native)** ở góc màn hình video để mua.\n"
-                f"- Không được so sánh giá/đưa khuyến mãi quá mức. Giữ câu trả lời tự nhiên, tạo tương tác."
-            )
         return "\n\n---\n\n".join(parts)
 
     def generate_response(self, comment: str, username: str = " Viewer",
-                          context: Optional[List[Dict]] = None,
-                          product_tag: Optional[str] = None) -> Optional[str]:
+                          context: Optional[List[Dict]] = None) -> Optional[str]:
         """
         Generate an AI response to a comment.
         Returns None if AI is disabled or on error.
@@ -215,9 +188,8 @@ class AIResponseEngine:
         with self._lock:
             self.last_response_time = current_time
 
-        # Build conversation context
         messages = [
-            {"role": "system", "content": self._build_system_prompt(product_tag=product_tag)},
+            {"role": "system", "content": self._build_system_prompt()},
         ]
         
         # Add recent history

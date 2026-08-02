@@ -11,7 +11,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="static/style.css?v=1.4.0">
+    <link rel="stylesheet" href="static/style.css?v=2.1.0">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
 <body>
@@ -62,14 +62,6 @@
                 <a href="#logs" class="nav-item" data-tab="logs">
                     <i class="fa-solid fa-terminal"></i>
                     <span>Nhật Ký Hệ Thống</span>
-                </a>
-                <a href="#ai" class="nav-item" data-tab="ai">
-                    <i class="fa-solid fa-brain"></i>
-                    <span>AI Trợ Lý</span>
-                </a>
-                <a href="#live" class="nav-item" data-tab="live">
-                    <i class="fa-solid fa-comments"></i>
-                    <span>Live Comment</span>
                 </a>
             </nav>
 
@@ -172,8 +164,7 @@
                                             <span class="pulse-dot" id="screenDot"></span>
                                             <span class="status-overlay" id="screenText">STREAM DISCONNECTED</span>
                                         </div>
-                                        <div class="screen-overlay-clock" id="screenClock">00:00:00</div>
-                                        <div class="screen-overlay-text" id="screenOverlayText">TIKTOK LIVE STREAM AUTOMATION</div>
+                                    <div class="screen-overlay-text" id="screenOverlayText">TIKTOK LIVE STREAM AUTOMATION</div>
                                     </div>
                                 </div>
                             </div>
@@ -376,179 +367,6 @@
                 </div>
             </div>
 
-            <!-- TAB 5: AI Assistant -->
-            <section class="tab-page" id="tab-ai">
-                <div class="panel glass mb-6">
-                    <div class="panel-header">
-                        <h3><i class="fa-solid fa-brain text-cyan"></i> AI Trợ Lý Live</h3>
-                    </div>
-                    <div class="panel-body">
-                        <div class="ai-config-box">
-                            <p class="text-sm text-muted mb-4">
-                                Cấu hình AI để tự động trả lời bình luận trong khi streaming. Hệ thống hỗ trợ 3 persona: <strong>Coder</strong>, <strong>Salesperson</strong>, và <strong>Assistant</strong>.
-                            </p>
-                            
-                            <form id="aiConfigForm" class="config-grid">
-                                <div class="form-group col-full">
-                                    <label><i class="fa-solid fa-key"></i> OpenAI API Key</label>
-                                    <input type="password" id="aiApiKey" class="form-input" placeholder="sk-..." required>
-                                    <small class="form-help">Nhập API key từ <a href="https://platform.openai.com/api-keys" target="_blank">OpenAI Platform</a> hoặc provider tương tự.</small>
-                                </div>
-
-                                <div class="form-group col-full">
-                                    <label><i class="fa-solid fa-server"></i> Base URL (tùy chọn)</label>
-                                    <input type="text" id="aiBaseUrl" class="form-input" placeholder="https://api.openai.com/v1">
-                                    <small class="form-help">Để trống dùng OpenAI mặc định. Ví dụ: https://api.poolside.ai/v1</small>
-                                </div>
-
-                                <div class="form-group">
-                                    <label><i class="fa-solid fa-cog"></i> Model</label>
-                                    <select id="aiModelPreset" class="form-select">
-                                        <option value="gpt-4o-mini">gpt-4o-mini (Nhanh & Tiết kiệm)</option>
-                                        <option value="gpt-4o">gpt-4o (Chất lượng cao)</option>
-                                        <option value="gpt-3.5-turbo">gpt-3.5-turbo (Miễn phí)</option>
-                                        <option value="custom">Tùy chỉnh...</option>
-                                    </select>
-                                </div>
-
-                                <div class="form-group" id="aiModelCustomWrap" style="display:none;">
-                                    <label><i class="fa-solid fa-tag"></i> Model tùy chỉnh</label>
-                                    <input type="text" id="aiModel" class="form-input" placeholder="ví dụ: poolside-chat, gpt-4o-mini...">
-                                </div>
-
-                                <div class="form-group">
-                                    <label><i class="fa-solid fa-user-robot"></i> Persona</label>
-                                    <select id="aiPersona" class="form-select">
-                                        <option value="assistant">Trợ lý chung (Assistant)</option>
-                                        <option value="coder">Lập trình viên (Coder)</option>
-                                        <option value="salesperson">Chuyên gia bán hàng (Salesperson)</option>
-                                    </select>
-                                </div>
-
-                                <div class="form-group col-full">
-                                    <label><i class="fa-solid fa-feather"></i> Custom System Prompt (tùy chọn)</label>
-                                    <textarea id="aiCustomPrompt" class="form-input" rows="3" placeholder="Thêm lệnh mở rộng cho AI. Ví dụ: luôn hát thơ, dùng ngôn ngữ cụ thể..."></textarea>
-                                    <small class="form-help">Nối với persona + prompt live mặc định. Để trống để dùng mặc định.</small>
-                                </div>
-
-                                <div class="form-group checkbox-group">
-                                    <label class="checkbox-label">
-                                        <input type="checkbox" id="aiEnabled">
-                                        <span>Bật AI tự động trả lời bình luận</span>
-                                    </label>
-                                </div>
-
-                                <div class="form-actions col-full">
-                                    <button type="submit" class="btn btn-cyan btn-lg btn-block">
-                                        <i class="fa-solid fa-save"></i> LƯU CẤU HÌNH AI
-                                    </button>
-                                </div>
-                            </form>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="panel glass">
-                    <div class="panel-header">
-                        <h3><i class="fa-solid fa-clock-rotate-left"></i> Lịch Sử Phản Hồi AI</h3>
-                        <button class="btn btn-dark btn-sm" id="btnClearAICache">
-                            <i class="fa-solid fa-trash"></i> Xóa Cache
-                        </button>
-                    </div>
-                    <div class="panel-body p-0">
-                        <div class="ai-response-log" id="aiResponseLog">
-                            <div class="log-line text-muted">Chưa có phản hồi AI nào.</div>
-                        </div>
-                    </div>
-                </div>
-            </section>
-
-            <!-- TAB 6: Live Comments -->
-            <section class="tab-page" id="tab-live">
-                <div class="panel glass mb-6">
-                    <div class="panel-header">
-                        <h3><i class="fa-solid fa-wifi"></i> Kết Nối TikTok Live</h3>
-                    </div>
-                    <div class="panel-body">
-                        <form id="liveConnectForm" class="auto-fetch-form">
-                            <div class="form-group col-full">
-                                <label><i class="fa-solid fa-user"></i> Username TikTok Live</label>
-                                <input type="text" id="liveUsername" class="form-input" placeholder="@username hoặc username" required>
-                                <small class="form-help">Nhập username TikTok của tài khoản bạn đang live (ví dụ: tiktok, hoặc @tiktok).</small>
-                            </div>
-                            <div class="form-group col-full">
-                                <label><i class="fa-solid fa-server"></i> HTTP Proxy (nếu webcast bị 403)</label>
-                                <input type="text" id="liveWebProxy" class="form-input" placeholder="http://user:pass@ip:port">
-                                <small class="form-help">Nếu VPS bị 403 Forbidden webcast.tiktok.com — nhập proxy HTTP.</small>
-                            </div>
-
-                            <div class="form-group checkbox-group">
-                                <label class="checkbox-label">
-                                    <input type="checkbox" id="liveAutoConnect" checked>
-                                    <span>Tự động kết nối khi bật stream</span>
-                                </label>
-                            </div>
-                            <button type="submit" class="btn btn-cyan btn-block mt-3" id="btnLiveConnect">
-                                <i class="fa-solid fa-plug-waveform"></i> KẾT NỐI TIKTOK LIVE
-                            </button>
-                        </form>
-                        
-                        <div class="live-stats-grid" style="display: none;" id="liveStatsGrid">
-                            <div class="metric-card glass">
-                                <div class="card-icon cyan">
-                                    <i class="fa-solid fa-eye"></i>
-                                </div>
-                                <div class="card-info">
-                                    <span class="card-label">NGƯỜI XEM</span>
-                                    <h3 class="card-value" id="valLiveViewers">0</h3>
-                                </div>
-                            </div>
-                            <div class="metric-card glass">
-                                <div class="card-icon amber">
-                                    <i class="fa-solid fa-comment-dots"></i>
-                                </div>
-                                <div class="card-info">
-                                    <span class="card-label">BÌNH LUẬN</span>
-                                    <h3 class="card-value" id="valLiveComments">0</h3>
-                                </div>
-                            </div>
-                            <div class="metric-card glass">
-                                <div class="card-icon emerald">
-                                    <i class="fa-solid fa-gift"></i>
-                                </div>
-                                <div class="card-info">
-                                    <span class="card-label">QUÀ TẶNG</span>
-                                    <h3 class="card-value" id="valLiveGifts">0</h3>
-                                </div>
-                            </div>
-                            <div class="metric-card glass">
-                                <div class="card-icon purple">
-                                    <i class="fa-solid fa-user-plus"></i>
-                                </div>
-                                <div class="card-info">
-                                    <span class="card-label">FOLLOW</span>
-                                    <h3 class="card-value" id="valLiveFollows">0</h3>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="panel glass">
-                    <div class="panel-header">
-                        <h3><i class="fa-solid fa-comment-dots"></i> Bình Luận Trực Tuyến</h3>
-                        <button class="btn btn-dark btn-sm" id="btnClearComments">
-                            <i class="fa-solid fa-broom"></i> Xóa Danh Sách
-                        </button>
-                    </div>
-                    <div class="panel-body p-0">
-                        <div class="live-comment-feed" id="liveCommentFeed">
-                            <div class="comment-item text-muted">Chưa kết nối tới live room...</div>
-                        </div>
-                    </div>
-                </div>
-            </section>
-
             <!-- TAB 4: LOGS -->
             <section class="tab-page" id="tab-logs">
                 <div class="panel glass">
@@ -586,20 +404,12 @@
             <i class="fa-solid fa-terminal"></i>
             <span>Logs</span>
         </a>
-        <a href="#ai" class="mobile-nav-item" data-tab="ai">
-            <i class="fa-solid fa-brain"></i>
-            <span>AI</span>
-        </a>
-        <a href="#live" class="mobile-nav-item" data-tab="live">
-            <i class="fa-solid fa-comments"></i>
-            <span>Live</span>
-        </a>
-    </nav>
+     </nav>
 
     <!-- Notification Toast Container -->
     <div id="toastContainer" class="toast-container"></div>
 
     <!-- {{VERSION}} is replaced by server with file hash -->
-    <script src="static/app.js?v=1.4.0"></script>
+    <script src="static/app.js?v=2.1.0"></script>
 </body>
 </html>

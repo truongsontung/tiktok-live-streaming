@@ -66,6 +66,8 @@ class TikTokLiveClientManager:
         self.on_connect_callbacks: List[Callable] = []
         self.on_disconnect_callbacks: List[Callable] = []
         self.on_viewer_join_callbacks: List[Callable] = []
+        self.on_like_callbacks: List[Callable] = []
+        self.on_follow_callbacks: List[Callable] = []
 
         # Stats
         self.total_comments: int = 0
@@ -156,6 +158,7 @@ class TikTokLiveClientManager:
 
         @self.client.on(CommentEvent)
         async def on_comment(cmd):
+            logger.debug(f"[EVENT] CommentEvent received from {cmd.user.nickname}: {cmd.comment[:50]}")
             ts = datetime.now().strftime("%H:%M:%S")
             comment_data = {
                 "timestamp": ts,
@@ -205,6 +208,7 @@ class TikTokLiveClientManager:
 
         @self.client.on(GiftEvent)
         async def on_gift(cmd):
+            logger.debug(f"[EVENT] GiftEvent received from {cmd.gift_user.nickname}: {cmd.gift.name}")
             gift_data = {
                 "timestamp": datetime.now().strftime("%H:%M:%S"),
                 "user": cmd.gift_user.nickname,
@@ -234,6 +238,11 @@ class TikTokLiveClientManager:
                 self.follows.append(follow_data)
                 self.total_follows += 1
             logger.info(f"New follow from: {cmd.follow_user.nickname}")
+            for cb in self.on_follow_callbacks:
+                try:
+                    cb(follow_data, self.total_follows)
+                except Exception as e:
+                    logger.error(f"Error in follow callback: {e}")
 
         @self.client.on(LikeEvent)
         async def on_like(cmd):
@@ -246,9 +255,17 @@ class TikTokLiveClientManager:
             with self._lock:
                 self.likes.append(like_data)
             logger.info(f"Like from: {cmd.like_user.nickname}")
+            for cb in self.on_like_callbacks:
+                try:
+                    cb(like_data, cmd.like_count)
+                except Exception as e:
+                    logger.error(f"Error in like callback: {e}")
 
         @self.client.on(RoomUserSeqEvent)
         async def on_viewer_count(cmd):
+            logger.debug(f"[EVENT] RoomUserSeqEvent received")
+            vc = getattr(cmd, 'viewer_count', None) or getattr(cmd, 'user_count', None)
+            logger.info(f"[LIVE] Viewer count updated: {vc}")
             join_callbacks = []
             with self._lock:
                 vc = getattr(cmd, 'viewer_count', None) or getattr(cmd, 'user_count', None)
@@ -309,6 +326,7 @@ class TikTokLiveClientManager:
             async def _connect():
                 try:
                     self.is_connecting = True
+                    logger.info(f"[LIVE] Connecting to TikTok live: @{self.username or self._last_username}...")
                     await self.client.start()
                     self.is_connected = True
                     self.connect_start_time = time.time()

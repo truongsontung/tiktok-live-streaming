@@ -22,3 +22,7 @@ overlays/*.txt
 !/overlays/.gitkeep
 tiktok_profile/
 media/overlays/
+*.pyc
+__pycache__/
+logs/
+overlays/

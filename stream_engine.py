@@ -16,7 +16,6 @@ import logging
 from datetime import datetime
 
 from tiktok_live_client import live_client
-from ai_engine import ai_engine
 from overlay_renderer import overlay_renderer
 from live_studio_scraper import scraper
 
@@ -58,29 +57,54 @@ class StreamEngine:
         self._comment_stop_event = threading.Event()
         self._key_refresh_thread = None
 
+        self._last_viewer_count: int = 0
+
         # Configure callbacks from live client
         live_client.on_comment_callbacks.append(self._handle_live_comment)
         live_client.on_viewer_join_callbacks.append(self._handle_viewer_join)
-    
+        live_client.on_gift_callbacks.append(self._handle_live_gift)
+
     def _handle_viewer_join(self, viewer_count: int):
-        """Callback when a new viewer joins the live room."""
-        overlay_renderer.add_welcome_message(f"Viewer #{viewer_count}")
+        """Callback when viewer count changes (viewer join OR leave).
+        Only zodiac avatar overlay is rendered — no text overlays."""
+        prev = self._last_viewer_count
+        delta = viewer_count - prev
+        self._last_viewer_count = viewer_count
+        logger.info(f"[LIVE] Viewer count: {prev} -> {viewer_count} (delta={delta})")
+
+        if not overlay_renderer.enabled_overlays.get("avatar_overlay", False):
+            logger.warning(f"[LIVE] Avatar overlay DISABLED — skipping avatar add (delta={delta})")
+            return
+
+        if delta > 0:
+            logger.info(f"[LIVE] Adding {delta} new avatar(s) for joining viewers")
+            for i in range(delta):
+                uid = f"viewer_{time.time()}_{i}"
+                overlay_renderer.add_viewer_avatar(uid)
+                logger.info(f"[LIVE] Added avatar for {uid}")
+        elif delta < 0:
+            logger.info(f"[LIVE] Removing {abs(delta)} avatar(s) for leaving viewers")
+            overlay_renderer.remove_excess_avatars(abs(delta))
+
+    def _handle_live_gift(self, gift_data: dict, total_gifts: int):
+        """Callback when a gift is received — trigger special avatar animation."""
+        username = gift_data.get("user", "Viewer")
+        gift_name = gift_data.get("gift_name", "")
+        diamonds = gift_data.get("diamonds", 0)
+        gift_count = gift_data.get('gift_count', 1)
+        logger.info(f"[LIVE] Gift: {username} -> {gift_name} (x{gift_count}, {diamonds} 💎)")
+        if overlay_renderer.enabled_overlays.get("avatar_overlay", False):
+            logger.info(f"[LIVE] Triggering gift animation for {username}")
+            overlay_renderer.trigger_gift_animation(username, gift_name)
+        else:
+            logger.warning(f"[LIVE] Avatar overlay DISABLED — gift animation skipped")
+
 
     def _handle_live_comment(self, comment_data: dict, comment_count: int):
-        """Callback when a new comment arrives from TikTok live."""
-        # Add to overlay
-        overlay_renderer.add_comment(comment_data.get("user", "Viewer"), comment_data.get("comment", ""))
-
-        # Generate AI response
-        if ai_engine.enabled:
-            ai_response = ai_engine.generate_response(
-                comment_data.get("comment", ""),
-                comment_data.get("user", "Viewer")
-            )
-            if ai_response:
-                overlay_renderer.add_comment("🤖 AI Assistant", ai_response, is_ai_response=True)
-                logger.info(f"AI Response: {ai_response}")
-
+        """Callback when a new comment arrives — log only (no text overlay)."""
+        username = comment_data.get("user", "?")
+        comment = comment_data.get("comment", "")[:50]
+        logger.info(f"[LIVE] Comment from {username}: {comment}")
     def load_config(self):
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, "r") as f:
@@ -147,7 +171,21 @@ class StreamEngine:
 
     def _ensure_audio(self, video_path, output_path):
         """Add silent audio track to a video if it has none (for concat compatibility)."""
-        if not os.path.exists(output_path):
+        if os.path.exists(output_path):
+            return
+        codec_info = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name,width,height", "-of", "csv=p=0", video_path],
+            capture_output=True, text=True, timeout=10
+        ).stdout.strip().split(",")
+
+        if len(codec_info) >= 3:
+            vcodec, vw, vh = codec_info[0], int(codec_info[1]), int(codec_info[2])
+        else:
+            vcodec = codec_info[0] if codec_info else ""
+
+        has_audio = self._get_audio_codec(video_path)
+        if not has_audio:
             subprocess.run([
                 "ffmpeg", "-y", "-i", video_path,
                 "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
@@ -160,7 +198,7 @@ class StreamEngine:
         cmd = [
             "ffmpeg", "-y", "-i", input_path,
             "-vf", f"scale={resolution}:force_original_aspect_ratio=decrease,pad={w}:{h}:0:0:black,fps=30",
-            "-c:v", "libx264", "-preset", "superfast", "-crf", "23",
+            "-c:v", "libx264", "-preset", "slow", "-crf", "27",
             "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
             output_path
         ]
@@ -179,10 +217,18 @@ class StreamEngine:
         resolution = config.get("resolution", "1080x1920")
         self._temp_files = []
         for video_path in playlist:
-            codec = self._get_video_codec(video_path)
-            if codec and codec not in ("h264", "avc"):
-                temp_path = os.path.join(LOGS_DIR, "converted_" + os.path.basename(video_path))
-                logger.info(f"Converting {os.path.basename(video_path)} ({codec}) to H.264...")
+            temp_path = os.path.join(LOGS_DIR, "converted_" + os.path.basename(video_path))
+            # Reuse existing conversion if file is less than 5 min old
+            if os.path.exists(temp_path) and (time.time() - os.path.getmtime(temp_path) < 300):
+                self._temp_files.append(temp_path)
+                continue
+            codec_info = subprocess.run(
+                ["ffprobe", "-v", "quiet", "-select_streams", "v:0",
+                 "-show_entries", "stream=codec_name", "-of", "csv=p=0", video_path],
+                capture_output=True, text=True, timeout=10
+            ).stdout.strip().split('\n')[0]
+            if codec_info and codec_info not in ("h264", "avc"):
+                logger.info(f"Converting {os.path.basename(video_path)} ({codec_info}) to H.264...")
                 self._convert_to_h264(video_path, temp_path, resolution)
                 if os.path.exists(temp_path) and os.path.getsize(temp_path) > 1000:
                     self._temp_files.append(temp_path)
@@ -261,8 +307,19 @@ class StreamEngine:
         if drawtext_args:
             filter_str += "," + ",".join(drawtext_args)
 
+        # Avatar image overlay (via FIFO pipe from overlay_renderer)
+        avatar_enabled = overlay_renderer.enabled_overlays.get("avatar_overlay", False)
+        fifo_path = overlay_renderer.get_overlay_fifo_path()
+
+        if avatar_enabled and fifo_path and os.path.exists(fifo_path):
+            # Add overlay FIFO as second input + use filter_complex with overlay
+            cmd.extend(["-f", "image2pipe", "-vcodec", "png", "-i", fifo_path])
+            filter_str = f"[0:v]{filter_str}[base];[1:v]fps={min(config.get('fps', 30), 15)}[ovr];[base][ovr]overlay=0:0:format=auto:eof_action=pass:repeatlast=0[vout]"
+            cmd.extend(["-filter_complex", filter_str, "-map", "[vout]", "-map", "0:a?"])
+        else:
+            cmd.extend(["-vf", filter_str])
+
         cmd.extend([
-            "-vf", filter_str,
             "-c:v", "libx264",
             "-preset", "superfast",
             "-tune", "zerolatency",
@@ -283,12 +340,10 @@ class StreamEngine:
         return cmd
 
     def _comment_monitor_loop(self):
-        """Monitor loop for updating overlays and processing AI responses."""
+        """Monitor loop for processing live interaction (avatars only, no text overlays)."""
         while not self._comment_stop_event.is_set():
             try:
                 live_telemetry = live_client.get_telemetry()
-                engine_telemetry = self.get_telemetry()
-                overlay_renderer.update_from_clients(live_telemetry, engine_telemetry)
             except Exception as e:
                 logger.debug(f"Comment monitor error: {e}")
             self._comment_stop_event.wait(timeout=1.0)
@@ -329,16 +384,6 @@ class StreamEngine:
             except Exception as e:
                 logger.warning(f"Auto-extract session failed: {e}")
 
-        # Configure AI engine if enabled
-        ai_config = config.get("ai_config") or {}
-        if ai_config.get("enabled", False) and ai_config.get("api_key"):
-            model = ai_config.get("model", "gpt-4o-mini")
-            persona = ai_config.get("persona", "assistant")
-            base_url = ai_config.get("base_url")
-            custom_prompt = ai_config.get("custom_system_prompt")
-            ai_engine.configure(ai_config["api_key"], model, persona, base_url, custom_prompt)
-            ai_engine.set_enabled(True)
-
         # Configure overlay renderer — enable overlays when streaming (default ON)
         overlay_enabled = config.get("overlay_enabled", True)
         overlay_renderer.set_enabled(overlay_enabled)
@@ -348,26 +393,34 @@ class StreamEngine:
         if overlay_config and isinstance(overlay_config, dict):
             overlay_renderer.configure_overlays(overlay_config)
         elif overlay_enabled:
-            # Default: enable comment_scroll + ai_response + welcome
+            # Default: enable only avatar overlay (no text overlays)
             overlay_renderer.configure_overlays({
-                "comment_scroll": True,
-                "ai_response": True,
-                "welcome": True,
-                "clock": True,
-                "stats_panel": True,
-                "viewer_count": True,
+                "avatar_overlay": True,
             })
+
+        # Start avatar overlay FIFO if enabled
+        if overlay_renderer.enabled_overlays.get("avatar_overlay", False):
+            w, h = config.get("resolution", "1080x1920").split("x")
+            overlay_renderer.start_overlay_fifo(int(w), int(h), min(config.get("fps", 30), 15))
+            overlay_renderer.load_avatar_pool()
+
+            # Apply zodiac-specific settings from config
+            overlay_renderer._avatar_fall_duration = overlay_config.get("zodiac_fall_duration", 2.0) \
+                if overlay_config else 2.0
+            overlay_renderer._avatar_target_height_ratio = overlay_config.get("zodiac_target_height_ratio", 0.66) \
+                if overlay_config else 0.66
+
+            # Seed a few test avatars so overlay is visible immediately even if TikTok live not connected
+            for i in range(3):
+                overlay_renderer.add_viewer_avatar(f"seed_avatar_{i}")
+                time.sleep(0.5)
 
         # Configure live client with TikTok credentials (integrated from comment_forwarder)
         tiktok_username = config.get("tiktok_username", "")
         tiktok_session = config.get("tiktok_session", "").strip()
         tt_target_idc = config.get("tiktok_tt_target_idc", "").strip()
         if tiktok_username and live_client.is_available():
-            live_client.configure(
-                tiktok_username,
-                web_proxy=config.get("tiktok_web_proxy"),
-                ws_proxy=config.get("tiktok_ws_proxy"),
-            )
+            live_client.configure(tiktok_username)
             connected = live_client.connect_async()
             if connected:
                 logger.info(f"Connected to TikTok live room for: @{tiktok_username}")
@@ -377,14 +430,8 @@ class StreamEngine:
             else:
                 logger.warning("Failed to connect to TikTok live room, streaming without live interaction")
 
-        # Clear stale convert cache so new playlist always re-resolves
+        # Reuse existing converted files — only reconvert if source changed
         self._temp_files = []
-        import glob as _glob
-        for old in _glob.glob(os.path.join(LOGS_DIR, "converted_*.mp4")):
-            try: os.remove(old)
-            except: pass
-
-        # Convert incompatible videos before starting
         self._convert_incompatible(config)
 
         # Start comment processor thread
@@ -449,7 +496,7 @@ class StreamEngine:
             if not os.path.exists(playlist_txt):
                 return
             
-            resolution = config.get("resolution", "1080x1920")
+            resolution = config.get("resolution", "720x1280")
             w, h = resolution.split("x")
             pw, ph = min(360, int(w)), min(640, int(h))
             
@@ -481,15 +528,19 @@ class StreamEngine:
 
     def _stop_preview(self):
         if self.preview_process:
-            self.preview_process.terminate()
             try:
-                self.preview_process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                self.preview_process.kill()
+                self.preview_process.terminate()
+                try:
+                    self.preview_process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    self.preview_process.kill()
+                    self.preview_process.wait(timeout=2)
+            except Exception as e:
+                logger.debug(f"Preview stop error: {e}")
             self.preview_process = None
         # Kill orphan preview FFmpeg (leak from crashed/older runs -> CPU full -> stream jitter)
         try:
-            subprocess.run(["pkill", "-f", "scale=360:640"], capture_output=True)
+            subprocess.run(["pkill", "-9", "-f", "scale=360:640"], capture_output=True)
         except Exception:
             pass
 
@@ -504,6 +555,7 @@ class StreamEngine:
                     self.process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     self.process.kill()
+                    self.process.wait(timeout=3)
             self.is_running = False
             self.status = "STOPPED"
 
@@ -511,8 +563,20 @@ class StreamEngine:
         self._stop_preview()
 
         # Kill ALL FFmpeg processes to prevent stale processes
-        subprocess.run(["pkill", "-f", "ffmpeg"], capture_output=True)
+        subprocess.run(["pkill", "-9", "-f", "ffmpeg"], capture_output=True)
         time.sleep(1)
+
+        # Reap any remaining zombie ffmpeg/preview processes
+        if self.process:
+            try: self.process.wait(timeout=2)
+            except: pass
+        if self.preview_process:
+            try: self.preview_process.wait(timeout=2)
+            except: pass
+
+        # Stop avatar overlay FIFO
+        overlay_renderer.stop_overlay_fifo()
+        overlay_renderer.clear_avatars()
 
         # Wait for _run_loop thread to fully exit
         if self.monitor_thread and self.monitor_thread.is_alive():
@@ -685,7 +749,6 @@ class StreamEngine:
                 "resolution": config.get("resolution", "1080x1920"),
                 "overlay_text": config.get("overlay_text", ""),
                 "live_client": live_client.get_telemetry(),
-                "ai_engine": ai_engine.get_telemetry(),
                 "overlay_renderer": overlay_renderer.get_telemetry(),
             }
             return telemetry

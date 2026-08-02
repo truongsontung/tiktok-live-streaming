@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
 TikTok Live Dashboard & REST API Web Application
-With Automatic TikTok Stream Key Retrieval, AI Response Engine, and Live Comment Handling.
+With Automatic TikTok Stream Key Retrieval and Live Comment Handling.
 """
 
 import os
 import json
+import gzip
 import secrets
 import subprocess
 import threading
@@ -18,9 +19,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse, Response, JSONResponse
 from pydantic import BaseModel
 from typing import Optional
+from contextlib import asynccontextmanager
 
 from stream_engine import engine, CONFIG_FILE, MEDIA_DIR, LOGS_DIR
-from ai_engine import ai_engine, AIResponseEngine
 from tiktok_live_client import live_client, TikTokLiveClientManager
 from overlay_renderer import overlay_renderer
 from live_studio_scraper import scraper
@@ -32,7 +33,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger("TikTokLiveApp")
 
-app = FastAPI(title="TikTok Live Control Center")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    try:
+        engine.stop_stream()
+    except Exception as e:
+        logger.warning(f"Shutdown cleanup error: {e}")
+
+app = FastAPI(title="TikTok Live Control Center", lifespan=lifespan)
 
 def _get_api_secret() -> str:
     """Load secret from config.json (or env override)."""
@@ -75,6 +84,66 @@ os.makedirs(STATIC_DIR, exist_ok=True)
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR, check_dir=False), name="static")
 
+THUMBS_DIR = os.path.join(STATIC_DIR, "thumbs")
+os.makedirs(THUMBS_DIR, exist_ok=True)
+
+CHUNK_SIZE = 16 * 1024 * 1024  # 16MB per chunk for chunked/resumable uploads
+
+# Background thumb extraction (only runs if file doesn't exist)
+def _ensure_thumbnail(filename: str):
+    thumb_path = os.path.join(THUMBS_DIR, filename + ".jpg")
+    if os.path.exists(thumb_path):
+        return thumb_path
+    video_path = os.path.join(MEDIA_DIR, filename)
+    if not os.path.exists(video_path):
+        return None
+    subprocess.run([
+        "ffmpeg", "-y", "-i", video_path,
+        "-ss", "00:00:01", "-vframes", "1", "-vf", "scale=240:320:force_original_aspect_ratio=decrease,pad=240:320:0:0:black",
+        "-q:v", "3", thumb_path
+    ], capture_output=True, timeout=30)
+    return thumb_path if os.path.exists(thumb_path) else None
+
+def _process_uploaded_file(filename: str):
+    """Start background conversion of an uploaded file: H.264 codec + thumbnail."""
+    target_path = os.path.join(MEDIA_DIR, filename)
+    _cfg = engine.load_config()
+    _target_res = _cfg.get("resolution", "720x1280")
+    _tw, _th = _target_res.split("x")
+
+    def _bg_convert():
+        try:
+            probe = subprocess.run(
+                ["ffprobe", "-v", "quiet", "-select_streams", "v:0",
+                 "-show_entries", "stream=codec_name,width,height", "-of", "csv=p=0", target_path],
+                capture_output=True, text=True, timeout=15
+            ).stdout.strip().split(",")
+            _needs_convert = False
+            if len(probe) >= 1:
+                _vcodec = probe[0].strip()
+                if _vcodec not in ("h264", "avc", "h264 "):
+                    _needs_convert = True
+            if _needs_convert:
+                converted_name = "converted_" + filename
+                converted_path = os.path.join(MEDIA_DIR, converted_name)
+                subprocess.run([
+                    "ffmpeg", "-y", "-i", target_path,
+                    "-vf", f"scale={_tw}:{_th}:force_original_aspect_ratio=decrease,pad={_tw}:{_th}:0:0:black,fps=30",
+                    "-c:v", "libx264", "-preset", "slow", "-crf", "27",
+                    "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+                    converted_path
+                ], capture_output=True, timeout=1800)
+                if os.path.exists(converted_path) and os.path.getsize(converted_path) > 100000:
+                    os.replace(converted_path, target_path)
+                    logger.info(f"Video converted to H.264: {filename}")
+            else:
+                logger.info(f"Video already H.264 @ {_target_res}, skipping conversion: {filename}")
+            _ensure_thumbnail(filename)
+        except Exception as e:
+            logger.warning(f"Background convert failed for {filename}: {e}")
+
+    threading.Thread(target=_bg_convert, daemon=True).start()
+
 class ConfigModel(BaseModel):
     rtmp_url: str
     stream_key: str
@@ -87,25 +156,15 @@ class ConfigModel(BaseModel):
     auto_reconnect: Optional[bool] = True
     overlay_text: Optional[str] = ""
     show_clock: Optional[bool] = True
+    overlay_enabled: Optional[bool] = False
+    overlay_config: Optional[dict] = None
     tiktok_username: Optional[str] = ""
-    ai_enabled: Optional[bool] = False
-    ai_config: Optional[dict] = None
 
 class TikTokSessionModel(BaseModel):
     session_id: str
 
 class TikTokUserModel(BaseModel):
     username: str
-    web_proxy: Optional[str] = None
-    ws_proxy: Optional[str] = None
-
-class AIConfigModel(BaseModel):
-    enabled: bool
-    api_key: str
-    model: Optional[str] = "gpt-4o-mini"
-    persona: Optional[str] = "assistant"
-    base_url: Optional[str] = None
-    custom_system_prompt: Optional[str] = None
 
 class LiveConfigModel(BaseModel):
     username: str
@@ -113,9 +172,6 @@ class LiveConfigModel(BaseModel):
 
 class OverlayTextModel(BaseModel):
     text: str
-
-class PersonaModel(BaseModel):
-    persona: str
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -159,7 +215,7 @@ def save_config(cfg: ConfigModel):
         with open(old_path, "r") as f:
             old = json.load(f)
     writable = {"resolution","video_bitrate","audio_bitrate","fps","mode",
-                "loop","auto_reconnect","overlay_text","show_clock","ai_enabled","ai_config"}
+                "loop","auto_reconnect","             overlay_text","show_clock","overlay_enabled","overlay_config","ai_enabled","ai_config"}
     for k in writable:
         v = new.get(k)
         if v is not None and v != "":
@@ -227,7 +283,11 @@ def fetch_tiktok_stream_key(req: TikTokSessionModel):
     try:
         req_obj = urllib.request.Request(url, data=post_data.encode(), headers=headers)
         with urllib.request.urlopen(req_obj, timeout=15) as resp:
-            raw = resp.read().decode()
+            raw = resp.read()
+            encoding = resp.headers.get("Content-Encoding", "")
+            if "gzip" in encoding:
+                raw = gzip.decompress(raw)
+            raw = raw.decode()
             data = json.loads(raw)
             
             stream_info = data.get("data", {}).get("stream_url", {})
@@ -267,7 +327,10 @@ def fetch_tiktok_stream_key(req: TikTokSessionModel):
     except urllib.error.HTTPError as e:
         error_body = ""
         try:
-            error_body = e.read().decode()[:200]
+            raw_err = e.read()
+            if "gzip" in e.headers.get("Content-Encoding", ""):
+                raw_err = gzip.decompress(raw_err)
+            error_body = raw_err.decode()[:200]
         except:
             pass
         # Fallback: try browser automation if direct API fails
@@ -390,7 +453,21 @@ def list_media():
             fpath = os.path.join(MEDIA_DIR, fname)
             if os.path.isfile(fpath) and not fname.startswith("."):
                 size_mb = round(os.path.getsize(fpath) / (1024 * 1024), 2)
-                files.append({"name": fname, "size_mb": size_mb})
+                thumb_url = None
+                duration = None
+                _ensure_thumbnail(fname)
+                thumb_path = os.path.join(THUMBS_DIR, fname + ".jpg")
+                if os.path.exists(thumb_path):
+                    thumb_url = f"static/thumbs/{fname}.jpg"
+                try:
+                    dur_ret = subprocess.run(
+                        ["ffprobe", "-v", "quiet", "-show_entries", "format=duration", "-of", "csv=p=0", fpath],
+                        capture_output=True, text=True, timeout=10
+                    )
+                    duration = float(dur_ret.stdout.strip()) if dur_ret.stdout.strip() else None
+                except Exception:
+                    pass
+                files.append({"name": fname, "size_mb": size_mb, "thumb_url": thumb_url, "duration": duration})
     return {"files": files}
 
 @app.post("/api/media/select")
@@ -423,78 +500,109 @@ def get_playlist():
     return {"playlist": current_cfg.get("media_playlist", [])}
 
 @app.post("/api/media/upload")
-async def upload_media(file: UploadFile = File(...)):
+async def upload_media(request: Request, file: UploadFile = File(...)):
+    max_size = 10 * 1024 * 1024 * 1024  # 10GB
+    content_length = request.headers.get("Content-Length", "unknown")
+    logger.info(f"Upload: filename={file.filename}, Content-Length={content_length}")
+
+    filename = file.filename
+    target_path = os.path.join(MEDIA_DIR, filename)
+
     file_size = 0
-    chunk_size = 10 * 1024 * 1024  # 10MB chunks
-    max_size = 600 * 1024 * 1024   # 600MB
-    target_path = os.path.join(MEDIA_DIR, file.filename)
-    
-    with open(target_path, "wb") as buffer:
-        while True:
-            chunk = await file.read(chunk_size)
-            if not chunk:
-                break
-            file_size += len(chunk)
-            if file_size > max_size:
-                buffer.close()
-                os.remove(target_path)
-                raise HTTPException(status_code=413, detail="File quá lớn (max 600MB). Nén video hoặc cắt ngắn.")
-            buffer.write(chunk)
+    try:
+        with open(target_path, "wb") as buffer:
+            while True:
+                chunk = await file.read(10 * 1024 * 1024)  # 10MB chunks
+                if not chunk:
+                    break
+                file_size += len(chunk)
+                if file_size > max_size:
+                    buffer.close()
+                    os.remove(target_path)
+                    raise HTTPException(status_code=413, detail="File quá lớn (max 10GB). Vui lòng nén video hoặc cắt ngắn.")
+                buffer.write(chunk)
+    except HTTPException:
+        raise
+    except Exception as e:
+        if os.path.exists(target_path):
+            os.remove(target_path)
+        logger.error(f"Upload error for {filename}: {e}")
+        raise HTTPException(status_code=500, detail=f"Lỗi tải lên: {str(e)}")
 
-    # Response immediately after file saved - convert runs fully async (non-blocking)
-    import threading as _threading
+    _process_uploaded_file(filename)
+    return {"success": True, "filename": filename, "size_mb": round(file_size / 1048576, 2), "converted": False, "message": "Đã lưu file, đang kiểm tra định dạng nền..."}
 
-    def _bg_convert():
-        try:
-            detected_codec = subprocess.run(
-                ["ffprobe", "-v", "quiet", "-show_entries", "stream=codec_name", "-of", "csv=p=0", target_path],
-                capture_output=True, text=True, timeout=15
-            ).stdout.strip()
-            if detected_codec not in ("h264", "avc"):
-                converted_name = "converted_" + file.filename
-                converted_path = os.path.join(MEDIA_DIR, converted_name)
-                subprocess.run([
-                    "ffmpeg", "-y", "-i", target_path,
-                    "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:0:0:black,fps=30",
-                    "-c:v", "libx264", "-preset", "superfast", "-crf", "23",
-                    "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
-                    converted_path
-                ], capture_output=True, timeout=1800)
-                if os.path.exists(converted_path) and os.path.getsize(converted_path) > 100000:
-                    os.replace(converted_path, target_path)
-                    logger.info(f"Video converted to H.264: {file.filename}")
-        except Exception as e:
-            logger.warning(f"Background convert failed for {file.filename}: {e}")
+@app.post("/api/media/upload-chunk")
+async def upload_chunk(request: Request):
+    filename = request.query_params.get("filename")
+    chunk_index = int(request.query_params.get("chunkIndex", 0))
+    total_chunks = int(request.query_params.get("totalChunks", 1))
+    upload_target = request.query_params.get("target", "media")  # "media" or "avatar"
 
-    _threading.Thread(target=_bg_convert, daemon=True).start()
+    if not filename:
+        raise HTTPException(status_code=400, detail="Thiếu filename")
+    safe_filename = os.path.basename(filename)
 
-    # Auto-tag product_tag tu key tuong ung trong ten file upload
-    _filename_tag = {
-        "áo thun size m": "áo thun", "ao thun size m": "áo thun",
-        "áo thun": "áo thun", "ao thun": "áo thun",
-        "cạo râu điện": "cạo râu", "cạo râu": "cạo râu",
-    }
-    _fname = (file.filename or "").lower().replace("_", " ").replace("-", " ")
-    matched_tag = None
-    for kw, tag in sorted(_filename_tag.items(), key=lambda x: -len(x[0])):
-        if kw in _fname:
-            matched_tag = tag
-            break
-    if matched_tag:
-        _tags_path = os.path.join(LOGS_DIR, "video_tags.json")
-        tags = {}
-        if os.path.exists(_tags_path):
-            try:
-                tags = json.load(open(_tags_path))
-            except Exception:
-                tags = {}
-        if file.filename not in tags:
-            tags[file.filename] = {"product_tag": matched_tag, "cart_link": None, "keywords": matched_tag}
-        with open(_tags_path, "w") as f:
-            json.dump(tags, f, indent=2)
-        logger.info(f"Auto-tagged {file.filename} -> product_tag={matched_tag}")
+    if upload_target == "avatar":
+        target_dir = os.path.join(STATIC_DIR, "avatars")
+    else:
+        target_dir = MEDIA_DIR
+    os.makedirs(target_dir, exist_ok=True)
+    target_path = os.path.join(target_dir, safe_filename)
 
-    return {"success": True, "filename": file.filename, "size_mb": round(file_size / 1048576, 2), "converted": False, "message": "Đã lưu file, đang convert nền..."}
+    chunk_data = await request.body()
+    if chunk_index == 0:
+        f = open(target_path, "wb")
+    else:
+        f = open(target_path, "r+b")
+    f.seek(chunk_index * CHUNK_SIZE)
+    f.write(chunk_data)
+    f.close()
+    file_size = os.path.getsize(target_path)
+    logger.info(f"Upload chunk {chunk_index}/{total_chunks} for {safe_filename} ({len(chunk_data)} bytes, target={upload_target})")
+
+    response_data = {"success": True, "chunkIndex": chunk_index, "file_size": file_size}
+    if chunk_index == total_chunks - 1:
+        response_data["completed"] = True
+        response_data["filename"] = safe_filename
+        response_data["size_mb"] = round(file_size / 1048576, 2)
+        if upload_target == "media":
+            response_data["message"] = "Đã lưu file, đang kiểm tra định dạng nền..."
+            _process_uploaded_file(safe_filename)
+        else:
+            response_data["message"] = "Đã tải avatar lên!"
+            overlay_renderer.load_avatar_pool()
+    return response_data
+
+
+@app.get("/api/avatars")
+def list_avatars():
+    """List all available avatar images."""
+    avatar_dir = os.path.join(STATIC_DIR, "avatars")
+    avatars = []
+    if os.path.exists(avatar_dir):
+        for f in sorted(os.listdir(avatar_dir)):
+            if f.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
+                fpath = os.path.join(avatar_dir, f)
+                avatars.append({
+                    "name": f,
+                    "url": f"static/avatars/{f}",
+                    "size_bytes": os.path.getsize(fpath),
+                })
+    return {"avatars": avatars, "count": len(avatars)}
+
+@app.delete("/api/avatars/{filename}")
+def delete_avatar(filename: str):
+    """Delete an avatar image."""
+    avatar_dir = os.path.join(STATIC_DIR, "avatars")
+    safe_name = os.path.basename(filename)
+    avatar_path = os.path.join(avatar_dir, safe_name)
+    if not os.path.exists(avatar_path):
+        raise HTTPException(status_code=404, detail=f"Avatar '{safe_name}' không tìm thấy")
+    os.remove(avatar_path)
+    overlay_renderer._avatar_cache.pop(avatar_path, None)
+    overlay_renderer.load_avatar_pool()
+    return {"success": True, "message": f"Đã xóa avatar: {safe_name}"}
 
 
 class TikTokUrlModel(BaseModel):
@@ -623,24 +731,42 @@ async def download_tiktok_video(req: TikTokUrlModel):
             logger.error(f"Failed to download video from URL: {url}")
             return
 
-        # Convert to H.264 1080x1920 30fps for concat compatibility
+        # Convert to H.264 at target resolution only if source isn't already compatible
         try:
-            converted_name = "converted_" + raw_filename
-            converted_path = os.path.join(MEDIA_DIR, converted_name)
-            subprocess.run([
-                "ffmpeg", "-y", "-i", target_path,
-                "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:0:0:black,fps=30",
-                "-c:v", "libx264", "-preset", "superfast", "-crf", "23",
-                "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
-                converted_path
-            ], capture_output=True, timeout=1800)
+            _cfg = engine.load_config()
+            _target_res = _cfg.get("resolution", "720x1280")
+            _target_w, _target_h = _target_res.split("x")
 
-            if os.path.exists(converted_path) and os.path.getsize(converted_path) > 100000:
-                # Replace original with H.264 version, use same raw_filename
-                os.replace(converted_path, target_path)
-                logger.info(f"TikTok video downloaded + converted: {raw_filename}")
+            _codec = subprocess.run(
+                ["ffprobe", "-v", "quiet", "-select_streams", "v:0", "-show_entries", "stream=codec_name,width,height", "-of", "csv=p=0", target_path],
+                capture_output=True, text=True, timeout=10
+            ).stdout.strip().split(",")
+
+            _needs_convert = False
+            if len(_codec) >= 1:
+                _vcodec = _codec[0].strip()
+                # Only check codec — FFmpeg stream handles scaling/padding
+                if _vcodec not in ("h264", "avc", "h264 "):
+                    _needs_convert = True  # Non-H.264 → must convert
+
+            if _needs_convert:
+                converted_name = "converted_" + raw_filename
+                converted_path = os.path.join(MEDIA_DIR, converted_name)
+                subprocess.run([
+                    "ffmpeg", "-y", "-i", target_path,
+                    "-vf", f"scale={_target_w}:{_target_h}:force_original_aspect_ratio=decrease,pad={_target_w}:{_target_h}:0:0:black,fps=30",
+                    "-c:v", "libx264", "-preset", "slow", "-crf", "27",
+                    "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+                    converted_path
+                ], capture_output=True, timeout=1800)
+
+                if os.path.exists(converted_path) and os.path.getsize(converted_path) > 100000:
+                    os.replace(converted_path, target_path)
+                    logger.info(f"TikTok video downloaded + converted: {raw_filename}")
+                else:
+                    logger.warning(f"TikTok conversion failed, using raw: {raw_filename}")
             else:
-                logger.warning(f"TikTok conversion failed, using raw: {raw_filename}")
+                logger.info(f"TikTok video already H.264 @ {_target_res}, skipping conversion: {raw_filename}")
 
             _tiktok_to_playlist(raw_filename)
         except Exception as e:
@@ -662,17 +788,32 @@ def convert_media(filename: str):
     target_path = os.path.join(MEDIA_DIR, filename)
     if not os.path.exists(target_path):
         raise HTTPException(status_code=404, detail="File not found")
-    codec = subprocess.run(["ffprobe", "-v", "quiet", "-show_entries", "stream=codec_name", "-of", "csv=p=0", target_path], capture_output=True, text=True, timeout=10)
-    if codec.stdout.strip() in ("h264", "avc"):
-        return {"success": True, "already_h264": True, "message": "Video đã định dạng H.264 rồi"}
+
+    _cfg = engine.load_config()
+    _target_res = _cfg.get("resolution", "720x1280")
+    _tw, _th = _target_res.split("x")
+
+    probe = subprocess.run(
+        ["ffprobe", "-v", "quiet", "-select_streams", "v:0",
+         "-show_entries", "stream=codec_name,width,height", "-of", "csv=p=0", target_path],
+        capture_output=True, text=True, timeout=10
+    ).stdout.strip().split(",")
+
+    if len(probe) >= 1:
+        _vcodec = probe[0].strip()
+        if _vcodec in ("h264", "avc", "h264 "):
+            return {"success": True, "already_compatible": True, "message": f"Video đã H.264, không cần convert"}
+
     converted_path = os.path.join(MEDIA_DIR, "converted_" + filename)
-    subprocess.run(["ffmpeg", "-y", "-i", target_path,
-        "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:0:0:black",
-        "-c:v", "libx264", "-preset", "medium", "-crf", "23", "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2", converted_path],
-        capture_output=True, timeout=120)
+    subprocess.run([
+        "ffmpeg", "-y", "-i", target_path,
+        "-vf", f"scale={_tw}:{_th}:force_original_aspect_ratio=decrease,pad={_tw}:{_th}:0:0:black",
+        "-c:v", "libx264", "-preset", "slow", "-crf", "27",
+        "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2", converted_path],
+        capture_output=True, timeout=300)
     if os.path.exists(converted_path) and os.path.getsize(converted_path) > 100000:
         os.replace(converted_path, target_path)
-        return {"success": True, "message": "Đã convert sang H.264 1080x1920"}
+        return {"success": True, "message": f"Đã convert sang H.264 {_target_res} (CRF 27)"}
     return {"success": False, "error": "Convert thất bại"}
 
 @app.get("/api/logs")
@@ -684,74 +825,7 @@ def get_logs():
             return {"logs": lines[-100:]}
     return {"logs": ["No logs recorded yet."]}
 
-
-# ===== AI ENGINE APIS =====
-
-@app.get("/api/ai/status")
-def get_ai_status():
-    """Get AI engine status and telemetry."""
-    return ai_engine.get_telemetry()
-
-@app.post("/api/ai/configure")
-def configure_ai(config: AIConfigModel):
-    """Configure AI engine with API key and settings."""
-    ai_engine.configure(config.api_key, config.model, config.persona, config.base_url, config.custom_system_prompt)
-    ai_engine.set_enabled(config.enabled)
-    
-    # Save to config file
-    current_cfg = engine.load_config()
-    if not current_cfg.get("api_key_secret"):
-        import secrets as _secrets
-        current_cfg["api_key_secret"] = _secrets.token_hex(16)
-    current_cfg["ai_enabled"] = config.enabled
-    current_cfg["ai_config"] = {
-        "api_key": config.api_key,
-        "model": config.model,
-        "persona": config.persona,
-        "base_url": config.base_url,
-        "custom_system_prompt": config.custom_system_prompt,
-        "enabled": config.enabled
-    }
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(current_cfg, f, indent=2)
-    
-    return {"success": True, "message": f"AI engine configured with persona: {config.persona}"}
-
-@app.post("/api/ai/toggle")
-def toggle_ai(enabled: bool):
-    """Enable or disable AI engine."""
-    ai_engine.set_enabled(enabled)
-    return {"success": True, "message": f"AI engine {'enabled' if enabled else 'disabled'}"}
-
-@app.post("/api/ai/persona")
-def set_ai_persona(model: PersonaModel):
-    """Set AI persona (coder, salesperson, assistant)."""
-    ai_engine.set_persona(model.persona)
-    return {"success": True, "message": f"Persona changed to: {model.persona}"}
-
-@app.post("/api/ai/response")
-def generate_ai_response(comment: str, username: str = "Viewer"):
-    """Generate an AI response to a comment (for testing)."""
-    if not ai_engine.enabled:
-        raise HTTPException(status_code=400, detail="AI engine is not enabled")
-    response = ai_engine.generate_response(comment, username)
-    if response:
-        return {"success": True, "response": response}
-    return {"success": False, "message": "No response generated"}
-
-@app.get("/api/ai/responses")
-def get_ai_responses(count: int = 20):
-    """Get cached AI responses."""
-    return {"responses": ai_engine.get_cached_responses(count)}
-
-@app.delete("/api/ai/cache")
-def clear_ai_cache():
-    """Clear AI response cache."""
-    ai_engine.clear_cache()
-    return {"success": True, "message": "AI cache cleared"}
-
-
-# ===== TIKTOK LIVE CLIENT APIS =====
+# ===== TIKTOK LIVE CLIENT APIS =====# ===== TIKTOK LIVE CLIENT APIS =====
 
 @app.get("/api/live/status")
 def get_live_status():
@@ -769,7 +843,7 @@ def connect_live_client(req: TikTokUserModel):
         raise HTTPException(status_code=400, detail="Username is required")
 
     current_cfg = engine.load_config()
-    live_client.configure(username, req.web_proxy, req.ws_proxy)
+    live_client.configure(username, None, None)
     if not live_client.client:
         raise HTTPException(status_code=500, detail=live_client.last_error or "TikTokLive client init failed")
 
@@ -808,8 +882,6 @@ def get_live_comments(count: int = 20):
 class ForwardCommentModel(BaseModel):
     username: str
     comment: str
-    product_tag: Optional[str] = None
-    cart_link: Optional[str] = None
 
 @app.get("/api/live/session-info")
 def live_session_info():
@@ -837,142 +909,23 @@ def get_public_config():
     return {
         "api_key_secret": cfg.get("api_key_secret", ""),
         "tiktok_username": cfg.get("tiktok_username", ""),
-        "ai_enabled": bool(cfg.get("ai_enabled", False)),
     }
 
 @app.post("/api/live/comment-forward")
 def forward_comment(req: ForwardCommentModel):
     """
     Receive a comment forwarded by an external listener (comment_forwarder.py)
-    on a clean IP / via proxy. Server ADDS user comment to overlay scroll +
-    generates AI response rendered as overlay text on the video stream.
+    on a clean IP / via proxy. Server ADDS user comment to overlay scroll.
     """
     if not live_client.is_available():
         raise HTTPException(status_code=500, detail="TikTokLive library not available on server")
-    # Inject comment → triggers _handle_live_comment callback → overlay + AI rendering
+    # Inject comment → triggers _handle_live_comment callback → overlay rendering
     live_client.inject_comment(req.username, req.comment, trigger_ai=True)
-
-    # Also generate AI response for the forwarder (if it needs to send to TikTok as reply)
-    ai_response = ""
-    if ai_engine.is_available() and ai_engine.enabled:
-        ai_response = ai_engine.generate_response(req.comment, req.username, product_tag=req.product_tag) or ""
 
     return {
         "success": True,
         "message": f"Comment forwarded by @{req.username}",
-        "ai_response": ai_response,
     }
-
-class TagMediaModel(BaseModel):
-    filename: str
-    product_tag: str
-    product_url: Optional[str] = None
-    cart_link: Optional[str] = None
-    product_id: Optional[str] = None
-    shop_id: Optional[str] = None
-    keywords: Optional[str] = None
-
-
-@app.post("/api/media/tag")
-def tag_media(model: TagMediaModel):
-    path = os.path.join(LOGS_DIR, "video_tags.json")
-    tags = {}
-    if os.path.exists(path):
-        try:
-            tags = json.load(open(path))
-        except Exception:
-            tags = {}
-    tags[model.filename] = {
-        "product_tag": model.product_tag,
-        "product_url": model.product_url,
-        "cart_link": model.cart_link,
-        "product_id": model.product_id,
-        "shop_id": model.shop_id,
-        "keywords": model.keywords or "",
-    }
-    with open(path, "w") as f:
-        json.dump(tags, f, indent=2)
-    return {"success": True, "tagged": model.filename, "product_tag": model.product_tag, "product_url": model.product_url}
-
-
-@app.get("/api/live/active-media")
-def get_active_media():
-    cfg = engine.load_config()
-    filename = cfg.get("active_media")
-    path = os.path.join(LOGS_DIR, "video_tags.json")
-    tag = {}
-    if filename and os.path.exists(path):
-        try:
-            tag = json.load(open(path)).get(filename, {})
-        except Exception:
-            tag = {}
-    return {
-        "filename": filename,
-        "product_tag": tag.get("product_tag"),
-        "product_url": tag.get("product_url"),
-        "product_id": tag.get("product_id"),
-        "shop_id": tag.get("shop_id"),
-        "cart_link": tag.get("cart_link"),
-        "keywords": tag.get("keywords", ""),
-    }
-
-
-@app.post("/api/tiktok/showcase/add")
-def add_to_showcase(filename: Optional[str] = None, product_id: Optional[str] = None,
-                    shop_id: Optional[str] = None):
-    """Them san pham vua roii vao Showcase cua Creator (Affiliate Creator API).
-    Tu dong lay product_id/shop_id tu video tag cua active_media, hoac dung product_id truyen dau vao.
-    Can TIKTOK_ACCESS_TOKEN env de xac thuc."""
-    import requests as _req
-    token = os.environ.get("TIKTOK_ACCESS_TOKEN", "")
-    if not token:
-        return {"success": False, "message": "Chua cau hinh TIKTOK_ACCESS_TOKEN (Creator API token)"}
-
-    cfg = engine.load_config()
-    active = filename or cfg.get("active_media")
-    tags_path = os.path.join(LOGS_DIR, "video_tags.json")
-    tag = {}
-    if active and os.path.exists(tags_path):
-        try:
-            tag = json.load(open(tags_path)).get(active, {})
-        except Exception:
-            tag = {}
-    pid = product_id or tag.get("product_id")
-    sid = shop_id or tag.get("shop_id")
-    if not pid or not sid:
-        return {"success": False, "message": "Can product_id + shop_id. Gan tag: POST /api/media/tag"}
-
-    resp = _req.post(
-        "https://business-api.tiktok.com/affiliate_creator/202405/showcases/products/add",
-        json={"product_id": pid, "shop_id": sid},
-        headers={"X-Access-Token": token, "Content-Type": "application/json"},
-        timeout=20,
-    )
-    try:
-        data = resp.json()
-    except Exception:
-        data = {"raw": resp.text[:300]}
-    if resp.status_code == 200 and data.get("data", {}).get("success") is not False:
-        return {"success": True, "message": "Da them san pham vao Showcase (nhan len duoi live mau vang)", "response": data}
-    return {"success": False, "message": f"Showcase add failed HTTP {resp.status_code}", "response": data}
-
-
-@app.get("/api/tiktok/showcase")
-def get_showcase_products():
-    """Lay danh sach san pham trong Showcase cua Creator."""
-    import requests as _req
-    token = os.environ.get("TIKTOK_ACCESS_TOKEN", "")
-    if not token:
-        return {"products": [], "message": "Chua cau hinh TIKTOK_ACCESS_TOKEN"}
-    resp = _req.get(
-        "https://business-api.tiktok.com/affiliate_creator/202405/showcases/products",
-        headers={"X-Access-Token": token, "Content-Type": "application/json"},
-        timeout=20,
-    )
-    try:
-        return {"products": resp.json().get("data", {}).get("product_list", []), "http": resp.status_code}
-    except Exception:
-        return {"products": [], "error": resp.text[:200]}
 
 @app.get("/api/live/gifts")
 def get_live_gifts(count: int = 10):
@@ -1036,18 +989,15 @@ def configure_overlays(enabled: bool, comment_scroll: bool = True, ai_response: 
 
 
 if __name__ == "__main__":
+    import signal
     import uvicorn
-    # Auto-load AI config from config.json on startup
-    try:
-        _startup_cfg = engine.load_config()
-        _ai = _startup_cfg.get("ai_config", {})
-        if _ai.get("enabled") and _ai.get("api_key"):
-            ai_engine.configure(
-                _ai["api_key"], _ai.get("model"), _ai.get("persona"),
-                _ai.get("base_url"), _ai.get("custom_system_prompt")
-            )
-            ai_engine.set_enabled(True)
-            print("AI engine auto-configured from config.json.", flush=True)
-    except Exception as e:
-        print(f"Startup AI config load failed: {e}", flush=True)
+    def _graceful_exit(signum, frame):
+        try:
+            engine.stop_stream()
+        except Exception:
+            pass
+        subprocess.run(["pkill", "-f", "ffmpeg"], capture_output=True)
+        exit(0)
+    signal.signal(signal.SIGTERM, _graceful_exit)
+    signal.signal(signal.SIGINT, _graceful_exit)
     uvicorn.run(app, host="127.0.0.1", port=8888)
