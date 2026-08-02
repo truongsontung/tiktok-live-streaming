@@ -555,6 +555,8 @@ document.addEventListener('DOMContentLoaded', () => {
             <ul class="playlist-list">`;
 
         if (window._currentPlaylist && window._currentPlaylist.length) {
+            // Filter out files that no longer exist on disk
+            window._currentPlaylist = window._currentPlaylist.filter(name => data.files.some(f => f.name === name));
             window._currentPlaylist.forEach((name, idx) => {
                 const fileInfo = data.files.find(f => f.name === name);
                 const dur = fileInfo && fileInfo.duration ? formatDuration(fileInfo.duration) : '';

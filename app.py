@@ -796,6 +796,18 @@ def delete_media(filename: str):
     target_path = os.path.join(MEDIA_DIR, filename)
     if os.path.exists(target_path):
         os.remove(target_path)
+        # Remove from playlist and active_media in config
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, "r") as f:
+                cfg = json.load(f)
+            playlist = cfg.get("media_playlist", [])
+            if filename in playlist:
+                playlist.remove(filename)
+                cfg["media_playlist"] = playlist
+            if cfg.get("active_media") == filename:
+                cfg["active_media"] = playlist[0] if playlist else ""
+            with open(CONFIG_FILE, "w") as f:
+                json.dump(cfg, f, indent=2, ensure_ascii=False)
         return {"success": True, "message": f"File {filename} deleted."}
     raise HTTPException(status_code=404, detail="File not found")
 
@@ -916,7 +928,7 @@ def live_session_info():
         "live_client_connected": live_client.is_connected,
     }
 
-@app.get("/api/config")
+@app.get("/api/config/public")
 def get_public_config():
     """
     Trả cấu hình cần thiết cho frontend (auth bởi nginx basic_auth).

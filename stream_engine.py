@@ -290,17 +290,27 @@ class StreamEngine:
         compatible_playlist = self._write_playlist(config)
 
         playlist_txt = os.path.join(LOGS_DIR, "playlist.txt")
+        loop_enabled = config.get("loop", True)
 
-        # Base FFmpeg command
-        cmd = [
-            "ffmpeg", "-y",
-            "-fflags", "+genpts+igndts",
-            "-re",
-            "-f", "concat",
-            "-safe", "0",
-            "-stream_loop", "-1" if config.get("loop", True) else "0",
-            "-i", playlist_txt
-        ]
+        # Single video: use -stream_loop directly (concat demuxer skips duplicate entries)
+        # Multiple videos: use concat demuxer with repeated entries
+        if len(compatible_playlist) == 1:
+            cmd = [
+                "ffmpeg", "-y",
+                "-fflags", "+genpts+igndts",
+                "-re",
+                "-stream_loop", "-1" if loop_enabled else "0",
+                "-i", compatible_playlist[0]
+            ]
+        else:
+            cmd = [
+                "ffmpeg", "-y",
+                "-fflags", "+genpts+igndts",
+                "-re",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", playlist_txt
+            ]
 
         # Use overlay renderer for dynamic overlays
         # Scale and pad: resize to fit, then pad to exact resolution (centered)
@@ -446,8 +456,8 @@ class StreamEngine:
         self.comment_processor_thread = threading.Thread(target=self._comment_monitor_loop, daemon=True)
         self.comment_processor_thread.start()
 
-# Preview process removed — saves 12% CPU (single thumbnail snapshot is sufficient)
-        # self._start_preview(config)
+        # Start lightweight preview (snapshot to /tmp/preview.jpg for dashboard)
+        self._start_preview(config)
 
         self.monitor_thread = threading.Thread(target=self._run_loop, daemon=True)
         self.monitor_thread.start()
@@ -488,42 +498,53 @@ class StreamEngine:
                 final_playlist.append(audio_path if os.path.exists(audio_path) else video_path)
 
         if final_playlist:
+            # Write playlist entries — loop by repeating entries (concat demuxer doesn't support -stream_loop)
+            loop_enabled = config.get("loop", True)
+            repeat_count = 200 if loop_enabled else 1
             with open(playlist_txt, "w") as f:
-                for video_path in final_playlist:
-                    f.write(f"file '{video_path}'\n")
+                for _ in range(repeat_count):
+                    for video_path in final_playlist:
+                        f.write(f"file '{video_path}'\n")
         return final_playlist
 
     def _start_preview(self, config):
         """Start a lightweight FFmpeg process for dashboard preview."""
-        # Kill old preview first -> prevent process leak (multiple preview FFmpgs ate CPU -> stutter)
         self._stop_preview()
-        # Ensure playlist.txt is fresh before starting preview
-        self._write_playlist(config)
         try:
-            playlist_txt = os.path.join(LOGS_DIR, "playlist.txt")
-            if not os.path.exists(playlist_txt):
+            playlist = self.get_media_playlist()
+            if not playlist:
                 return
-            
+
             resolution = config.get("resolution", "720x1280")
             w, h = resolution.split("x")
             pw, ph = min(360, int(w)), min(640, int(h))
-            
-            filter_str = f"scale={pw}:{ph}:force_original_aspect_ratio=decrease,pad={pw}:{ph}:0:0:black,fps=2"
-            
-            cmd = [
-                "ffmpeg", "-y",
-                "-re",
-                "-f", "concat", "-safe", "0",
-                "-stream_loop", "-1",
-                "-i", playlist_txt,
-                "-vf", filter_str,
-                "-update", "1",
-                "-q:v", "3",
-                "/tmp/preview.jpg",
-            ]
-            
+            filter_str = f"scale={pw}:{ph}:force_original_aspect_ratio=decrease,pad={pw}:{ph}:0:0:black,fps=1"
+            loop_enabled = config.get("loop", True)
+
+            if len(playlist) == 1:
+                cmd = [
+                    "ffmpeg", "-y", "-re",
+                    "-stream_loop", "-1" if loop_enabled else "0",
+                    "-i", playlist[0],
+                    "-vf", filter_str,
+                    "-update", "1", "-q:v", "3",
+                    "/tmp/preview.jpg",
+                ]
+            else:
+                playlist_txt = os.path.join(LOGS_DIR, "playlist.txt")
+                if not os.path.exists(playlist_txt):
+                    return
+                cmd = [
+                    "ffmpeg", "-y", "-re",
+                    "-f", "concat", "-safe", "0",
+                    "-i", playlist_txt,
+                    "-vf", filter_str,
+                    "-update", "1", "-q:v", "3",
+                    "/tmp/preview.jpg",
+                ]
+
             self.preview_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            logger.info("Preview process started (360x640 @ 2fps, continuous)")
+            logger.info("Preview process started (snapshot for dashboard)")
         except Exception as e:
             logger.debug(f"Preview start error: {e}")
 
@@ -671,6 +692,9 @@ class StreamEngine:
                 try: os.remove(tmp)
                 except: pass
 
+            # Restart preview after playlist rebuild
+            self._start_preview(config)
+
             try:
                 cmd = self.build_ffmpeg_command(config)
                 logger.info(f"Launching FFmpeg Stream process (Target: {config.get('rtmp_url')})...")
@@ -707,7 +731,8 @@ class StreamEngine:
             if self.should_stop:
                 break
 
-            if config.get("auto_reconnect", True):
+            # Only auto-reconnect on error (non-zero exit). Code 0 = normal EOF (playlist finished).
+            if exit_code != 0 and config.get("auto_reconnect", True):
                 self.reconnect_count += 1
                 logger.info(f"Auto-reconnecting stream (Attempt #{self.reconnect_count})... Waiting 5 seconds.")
                 with self.lock:
