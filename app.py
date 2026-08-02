@@ -26,6 +26,11 @@ from tiktok_live_client import live_client, TikTokLiveClientManager
 from overlay_renderer import overlay_renderer
 from live_studio_scraper import scraper
 
+# Integrated Sign Server (bypasses eulerstream.com rate limit)
+from sign_server_with_browser import SignServerWithBrowser
+
+_sign_server = SignServerWithBrowser(port=9801)
+
 # Logger setup
 logging.basicConfig(
     level=logging.INFO,
@@ -35,11 +40,22 @@ logger = logging.getLogger("TikTokLiveApp")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Start Sign Server + Playwright cookie extraction (blocking ~50s)
+    logger.info("Starting Sign Server + Cookie extraction...")
+    _sign_server.start(blocking=True)
+    _sign_server.start_background_refresh()
+    if not _sign_server.is_ready:
+        logger.error("Sign Server cookies not available - TikTok live events may fail!")
+    else:
+        logger.info("Sign Server ready: cookies extracted, WebSocket URL cached")
     yield
     try:
         engine.stop_stream()
     except Exception as e:
         logger.warning(f"Shutdown cleanup error: {e}")
+    finally:
+        _sign_server.shutdown()
+        logger.info("Sign Server shut down")
 
 app = FastAPI(title="TikTok Live Control Center", lifespan=lifespan)
 
@@ -843,7 +859,9 @@ def connect_live_client(req: TikTokUserModel):
         raise HTTPException(status_code=400, detail="Username is required")
 
     current_cfg = engine.load_config()
-    live_client.configure(username, None, None)
+    tiktok_session = current_cfg.get("tiktok_session", "").strip()
+    tt_target_idc = current_cfg.get("tiktok_tt_target_idc", "").strip()
+    live_client.configure(username, None, None, tiktok_session or None, tt_target_idc or None)
     if not live_client.client:
         raise HTTPException(status_code=500, detail=live_client.last_error or "TikTokLive client init failed")
 

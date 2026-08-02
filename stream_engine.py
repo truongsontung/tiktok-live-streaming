@@ -16,8 +16,16 @@ import logging
 from datetime import datetime
 
 from tiktok_live_client import live_client
+from sign_server_with_browser import get_tt_target_idc
 from overlay_renderer import overlay_renderer
 from live_studio_scraper import scraper
+
+# Check if sign server is available (for tt_target_idc)
+try:
+    from sign_server_with_browser import SignServerWithBrowser, _cookie_cache
+    _sign_server_available = True
+except ImportError:
+    _sign_server_available = False
 
 # Base paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -418,15 +426,12 @@ class StreamEngine:
         # Configure live client with TikTok credentials (integrated from comment_forwarder)
         tiktok_username = config.get("tiktok_username", "")
         tiktok_session = config.get("tiktok_session", "").strip()
-        tt_target_idc = config.get("tiktok_tt_target_idc", "").strip()
+        tt_target_idc = get_tt_target_idc()
         if tiktok_username and live_client.is_available():
-            live_client.configure(tiktok_username)
+            live_client.configure(tiktok_username, None, None, tiktok_session, tt_target_idc or None)
             connected = live_client.connect_async()
             if connected:
                 logger.info(f"Connected to TikTok live room for: @{tiktok_username}")
-                # Apply session credentials for authenticated API calls (optional)
-                if tiktok_session:
-                    live_client._apply_session(tiktok_session, tt_target_idc or None)
             else:
                 logger.warning("Failed to connect to TikTok live room, streaming without live interaction")
 

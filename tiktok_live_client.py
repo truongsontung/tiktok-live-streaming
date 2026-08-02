@@ -6,6 +6,7 @@ Connects to TikTok live rooms and listens for real-time events (comments, gifts,
 
 import os
 os.environ.setdefault("WHITELIST_AUTHENTICATED_SESSION_ID_HOST", "api.eulerstream.com")
+os.environ.setdefault("SIGN_API_URL", "http://127.0.0.1:9801")
 
 import asyncio
 import json
@@ -158,13 +159,14 @@ class TikTokLiveClientManager:
 
         @self.client.on(CommentEvent)
         async def on_comment(cmd):
-            logger.debug(f"[EVENT] CommentEvent received from {cmd.user.nickname}: {cmd.comment[:50]}")
+            logger.info(f"[COMMENT] {cmd.user.nickname}: {cmd.comment}")
             ts = datetime.now().strftime("%H:%M:%S")
+            _profile_pic = getattr(cmd.user, 'profile_picture', None)
             comment_data = {
                 "timestamp": ts,
                 "user": cmd.user.nickname,
                 "comment": cmd.comment,
-                "profile_pic": cmd.user.profile_picture.url if cmd.user.profile_picture else None,
+                "profile_pic": _profile_pic.url if _profile_pic else None,
                 "is_verified": getattr(cmd.user, 'verified', False),
                 "timestamp_unix": time.time()
             }
@@ -181,6 +183,83 @@ class TikTokLiveClientManager:
                     cb(comment_data, current_count)
                 except Exception as e:
                     logger.error(f"Error in comment callback: {e}")
+
+        @self.client.on(GiftEvent)
+        async def on_gift(cmd):
+            logger.debug(f"[EVENT] GiftEvent received from {cmd.gift_user.nickname}: {cmd.gift.name}")
+            gift_data = {
+                "timestamp": datetime.now().strftime("%H:%M:%S"),
+                "user": cmd.gift_user.nickname,
+                "gift_name": cmd.gift.name,
+                "gift_value": cmd.gift.value,
+                "gift_count": cmd.gift.count,
+                "diamonds": cmd.gift.value * cmd.gift.count,
+                "timestamp_unix": time.time()
+            }
+            with self._lock:
+                self.gifts.append(gift_data)
+                self.total_gifts += 1
+            logger.info(f"[GIFT] {cmd.gift_user.nickname}: {cmd.gift.name} x{cmd.gift.count}")
+            for cb in self.on_gift_callbacks:
+                try:
+                    cb(gift_data, self.total_gifts)
+                except Exception as e:
+                    logger.error(f"Error in gift callback: {e}")
+
+        @self.client.on(FollowEvent)
+        async def on_follow(cmd):
+            follow_data = {
+                "timestamp": datetime.now().strftime("%H:%M:%S"),
+                "user": cmd.follow_user.nickname,
+                "timestamp_unix": time.time()
+            }
+            with self._lock:
+                self.follows.append(follow_data)
+                self.total_follows += 1
+            logger.info(f"[FOLLOW] {cmd.follow_user.nickname}")
+            for cb in self.on_follow_callbacks:
+                try:
+                    cb(follow_data, self.total_follows)
+                except Exception as e:
+                    logger.error(f"Error in follow callback: {e}")
+
+        @self.client.on(LikeEvent)
+        async def on_like(cmd):
+            like_data = {
+                "timestamp": datetime.now().strftime("%H:%M:%S"),
+                "user": cmd.user.nickname,
+                "total_likes": cmd.count,
+                "timestamp_unix": time.time()
+            }
+            with self._lock:
+                self.likes.append(like_data)
+            logger.info(f"[LIKE] {cmd.user.nickname} ({cmd.count})")
+            for cb in self.on_like_callbacks:
+                try:
+                    cb(like_data, cmd.count)
+                except Exception as e:
+                    logger.error(f"Error in like callback: {e}")
+
+        @self.client.on(RoomUserSeqEvent)
+        async def on_viewer_count(cmd):
+            logger.debug(f"[EVENT] RoomUserSeqEvent received")
+            vc = getattr(cmd, 'total_user', None) or getattr(cmd, 'user_count', None)
+            logger.info(f"[LIVE] Viewer count updated: {vc}")
+            join_callbacks = []
+            with self._lock:
+                vc = getattr(cmd, 'total_user', None) or getattr(cmd, 'user_count', None)
+                if vc is not None:
+                    prev = self.viewer_count
+                    self.viewer_count = vc
+                    if self.peak_viewers < vc:
+                        self.peak_viewers = vc
+                    if vc > prev:
+                        join_callbacks = list(self.on_viewer_join_callbacks)
+            for cb in join_callbacks:
+                try:
+                    cb(self.viewer_count)
+                except Exception as e:
+                    logger.error(f"Error in viewer join callback: {e}")
 
     def inject_comment(self, username: str, comment: str, trigger_ai: bool = True):
         """Inject an external comment (e.g. from proxy-forwarder) as if received live."""
@@ -205,82 +284,6 @@ class TikTokLiveClientManager:
                 except Exception as e:
                     logger.error(f"Error in comment callback: {e}")
         return True
-
-        @self.client.on(GiftEvent)
-        async def on_gift(cmd):
-            logger.debug(f"[EVENT] GiftEvent received from {cmd.gift_user.nickname}: {cmd.gift.name}")
-            gift_data = {
-                "timestamp": datetime.now().strftime("%H:%M:%S"),
-                "user": cmd.gift_user.nickname,
-                "gift_name": cmd.gift.name,
-                "gift_value": cmd.gift.value,
-                "gift_count": cmd.gift.count,
-                "diamonds": cmd.gift.value * cmd.gift.count,
-                "timestamp_unix": time.time()
-            }
-            with self._lock:
-                self.gifts.append(gift_data)
-                self.total_gifts += 1
-            for cb in self.on_gift_callbacks:
-                try:
-                    cb(gift_data, self.total_gifts)
-                except Exception as e:
-                    logger.error(f"Error in gift callback: {e}")
-
-        @self.client.on(FollowEvent)
-        async def on_follow(cmd):
-            follow_data = {
-                "timestamp": datetime.now().strftime("%H:%M:%S"),
-                "user": cmd.follow_user.nickname,
-                "timestamp_unix": time.time()
-            }
-            with self._lock:
-                self.follows.append(follow_data)
-                self.total_follows += 1
-            logger.info(f"New follow from: {cmd.follow_user.nickname}")
-            for cb in self.on_follow_callbacks:
-                try:
-                    cb(follow_data, self.total_follows)
-                except Exception as e:
-                    logger.error(f"Error in follow callback: {e}")
-
-        @self.client.on(LikeEvent)
-        async def on_like(cmd):
-            like_data = {
-                "timestamp": datetime.now().strftime("%H:%M:%S"),
-                "user": cmd.like_user.nickname,
-                "total_likes": cmd.like_count,
-                "timestamp_unix": time.time()
-            }
-            with self._lock:
-                self.likes.append(like_data)
-            logger.info(f"Like from: {cmd.like_user.nickname}")
-            for cb in self.on_like_callbacks:
-                try:
-                    cb(like_data, cmd.like_count)
-                except Exception as e:
-                    logger.error(f"Error in like callback: {e}")
-
-        @self.client.on(RoomUserSeqEvent)
-        async def on_viewer_count(cmd):
-            logger.debug(f"[EVENT] RoomUserSeqEvent received")
-            vc = getattr(cmd, 'viewer_count', None) or getattr(cmd, 'user_count', None)
-            logger.info(f"[LIVE] Viewer count updated: {vc}")
-            join_callbacks = []
-            with self._lock:
-                vc = getattr(cmd, 'viewer_count', None) or getattr(cmd, 'user_count', None)
-                if vc is not None:
-                    prev = self.viewer_count
-                    self.viewer_count = vc
-                    if self.peak_viewers < vc:
-                        self.peak_viewers = vc
-                    if vc > prev:
-                        join_callbacks = list(self.on_viewer_join_callbacks)
-            for cb in join_callbacks:
-                try:
-                    cb(self.viewer_count)
-                except Exception as e:
-                    logger.error(f"Error in viewer join callback: {e}")
 
     def connect_async(self):
         """Start the async event loop in a background thread."""
