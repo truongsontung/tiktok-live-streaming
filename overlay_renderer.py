@@ -422,7 +422,8 @@ class OverlayRenderer:
                 except Exception: pass
                 fd = None
                 fifo = None
-                break
+                if self._overlay_stop_event.is_set():
+                    break  # Shutdown requested
             except OSError as e:
                 if e.errno == errno.ENXIO:
                     time.sleep(0.1)
