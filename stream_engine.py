@@ -67,9 +67,8 @@ class StreamEngine:
         self.comment_processor_thread = None
         self._comment_stop_event = threading.Event()
         self._key_refresh_thread = None
+
         self._last_viewer_count: int = 0
-        self._reconnect_timestamps = []  # Track reconnect times for rate limiting
-        self._reconnect_backoff = 0  # Exponential backoff seconds
 
         # Configure callbacks from live client
         live_client.on_comment_callbacks.append(self._handle_live_comment)
@@ -360,7 +359,7 @@ class StreamEngine:
         loop_enabled = config.get("loop", True)
 
         # Single video: use -stream_loop directly (no concat needed)
-        # Multiple videos: concat demuxer with repeated entries + -stream_loop (loops indefinitely)
+        # Multiple videos: concat filter with -i per video (handles different resolutions)
         if len(compatible_playlist) == 1:
             cmd = [
                 "ffmpeg", "-y",
@@ -370,27 +369,20 @@ class StreamEngine:
                 "-i", compatible_playlist[0]
             ]
         else:
-            # Pre-convert videos that need rotation (landscape → portrait for portrait output)
-            pre_converted = self._pre_convert_for_loop(compatible_playlist, resolution, config)
-            # Write playlist with repeated entries for looping (concat demuxer + -stream_loop)
-            repeat_count = 200 if loop_enabled else 1
-            with open(playlist_txt, "w") as f:
-                for _ in range(repeat_count):
-                    for vp in pre_converted:
-                        f.write(f"file '{vp}'\n")
-
+            # Concat filter: frame-level concat, handles different codecs/resolutions
+            # No packet-level boundary issues
             cmd = [
                 "ffmpeg", "-y",
                 "-fflags", "+genpts+igndts",
                 "-re",
-                "-f", "concat",
-                "-safe", "0",
-                "-stream_loop", "-1" if loop_enabled else "0",
-                "-i", playlist_txt,
             ]
+            n = len(compatible_playlist)
+            for vp in compatible_playlist:
+                cmd.extend(["-i", vp])
 
         # Use overlay renderer for dynamic overlays
         w, h = resolution.split("x")
+        base_filter = f"scale={resolution}:force_original_aspect_ratio=decrease,pad={w}:{h}:0:0:black"
 
         # Apply overlay renderer settings from config
         overlay_renderer.set_enabled(config.get("overlay_enabled", True))
@@ -405,25 +397,58 @@ class StreamEngine:
         pw, ph = min(360, int(w)), min(640, int(h))
         preview_vf = f"scale={pw}:{ph}:force_original_aspect_ratio=decrease,pad={pw}:{ph}:0:0:black,fps=1/5"
 
-        rotation_mode = config.get("rotation_mode", "auto")
-
-        # All cases now use single input (single video or merged loop file)
-        # Rotation is baked into the source/merged file
-        if avatar_enabled and fifo_path and os.path.exists(fifo_path):
-            overlay_fps = overlay_renderer.get_overlay_fps()
-            cmd.extend([
-                "-f", "image2pipe", "-vcodec", "png",
-                "-framerate", str(overlay_fps),
-                "-i", fifo_path
-            ])
-            # [0:v] is the pre-converted/merged video (already rotated to target res)
-            # [1:v] is the overlay avatar stream
-            filter_str = f"[0:v]null[base];[1:v]scale={w}:{h}:flags=lanczos[ovr];[base][ovr]overlay=0:0:format=auto:eof_action=pass:repeatlast=1[vout];[vout]split=2[vmain][vprev_raw];[vprev_raw]{preview_vf}[vprev]"
-            cmd.extend(["-filter_complex", filter_str, "-map", "[vmain]", "-map", "0:a?"])
+        if len(compatible_playlist) == 1:
+            if avatar_enabled and fifo_path and os.path.exists(fifo_path):
+                overlay_fps = overlay_renderer.get_overlay_fps()
+                cmd.extend([
+                    "-f", "image2pipe", "-vcodec", "png",
+                    "-framerate", str(overlay_fps),
+                    "-i", fifo_path
+                ])
+                rotation_mode = config.get("rotation_mode", "fixed")
+                input_vf = self._get_video_filter_for_input(compatible_playlist[0], resolution, rotation_mode)
+                filter_str = f"[0:v]{input_vf}[base];[1:v]scale={w}:{h}:flags=lanczos[ovr];[base][ovr]overlay=0:0:format=auto:eof_action=pass:repeatlast=1[vout];[vout]split=2[vmain][vprev_raw];[vprev_raw]{preview_vf}[vprev]"
+                cmd.extend(["-filter_complex", filter_str, "-map", "[vmain]", "-map", "0:a?"])
+            else:
+                # Single video, no overlay: use split for preview
+                rotation_mode = config.get("rotation_mode", "fixed")
+                vf = self._get_video_filter_for_input(compatible_playlist[0], resolution, rotation_mode)
+                filter_str = f"[0:v]{vf}[vout];[vout]split=2[vmain][vprev_raw];[vprev_raw]{preview_vf}[vprev]"
+                cmd.extend(["-filter_complex", filter_str, "-map", "[vmain]", "-map", "0:a?"])
         else:
-            # Single input: just split for preview
-            filter_str = f"[0:v]null[vout];[vout]split=2[vmain][vprev_raw];[vprev_raw]{preview_vf}[vprev]"
-            cmd.extend(["-filter_complex", filter_str, "-map", "[vmain]", "-map", "0:a?"])
+            # Multi-video: concat filter with optional overlay
+            n = len(compatible_playlist)
+            if avatar_enabled and fifo_path and os.path.exists(fifo_path):
+                overlay_fps = overlay_renderer.get_overlay_fps()
+                cmd.extend([
+                    "-f", "image2pipe", "-vcodec", "png",
+                    "-framerate", str(overlay_fps),
+                    "-i", fifo_path
+                ])
+                # Scale each input → concat → overlay → split for preview
+                filter_str = ""
+                n = len(compatible_playlist)
+                rotation_mode = config.get("rotation_mode", "fixed")
+                for i in range(n):
+                    vf = self._get_video_filter_for_input(compatible_playlist[i], resolution, rotation_mode)
+                    filter_str += f"[{i}:v]{vf}[v{i}];[{i}:a]aresample=44100,aformat=channel_layouts=stereo[va{i}];"
+                # Interleave video/audio inputs for concat filter
+                concat_inputs = "".join(f"[v{i}][va{i}]" for i in range(n))
+                overlay_idx = n
+                filter_str += f"{concat_inputs}concat=n={n}:v=1:a=1[vconcat][aconcat];[{overlay_idx}:v]scale={w}:{h}:flags=lanczos[ovr];[vconcat][ovr]overlay=0:0:format=auto:eof_action=pass:repeatlast=1[vout];[vout]split=2[vmain][vprev_raw];[vprev_raw]{preview_vf}[vprev]"
+                cmd.extend(["-filter_complex", filter_str, "-map", "[vmain]", "-map", "[aconcat]"])
+            else:
+                # No overlay: concat filter only
+                filter_str = ""
+                n = len(compatible_playlist)
+                rotation_mode = config.get("rotation_mode", "fixed")
+                for i in range(n):
+                    vf = self._get_video_filter_for_input(compatible_playlist[i], resolution, rotation_mode)
+                    filter_str += f"[{i}:v]{vf}[v{i}];[{i}:a]aresample=44100,aformat=channel_layouts=stereo[va{i}];"
+                # Interleave video/audio inputs for concat filter
+                concat_inputs = "".join(f"[v{i}][va{i}]" for i in range(n))
+                filter_str += f"{concat_inputs}concat=n={n}:v=1:a=1[vout][aout];[vout]split=2[vmain][vprev_raw];[vprev_raw]{preview_vf}[vprev]"
+                cmd.extend(["-filter_complex", filter_str, "-map", "[vmain]", "-map", "[aout]"])
 
         # Preview output: JPEG from same filter pipeline (perfect sync with stream)
         # Main output encode settings
@@ -475,10 +500,7 @@ class StreamEngine:
             # Wait for any previous _run_loop thread to fully exit
             if self.monitor_thread and self.monitor_thread.is_alive():
                 self.should_stop = True
-                self.monitor_thread.join(timeout=15)
-                if self.monitor_thread.is_alive():
-                    logger.warning("Previous _run_loop thread did not exit, force killing")
-                    self.process = None
+                self.monitor_thread.join(timeout=5)
 
             self.should_stop = False
             self._comment_stop_event.clear()
@@ -654,9 +676,8 @@ class StreamEngine:
                     os.remove(temp_file)
                 except:
                     pass
-
-        # Clean up rotated temp files
-        for tmp in glob.glob(os.path.join(LOGS_DIR, "rotated_*")):
+        # Clean up audioadded + converted temp files
+        for tmp in glob.glob(os.path.join(LOGS_DIR, "audioadded_*")) + glob.glob(os.path.join(LOGS_DIR, "converted_*")):
             try:
                 os.remove(tmp)
             except:
@@ -705,132 +726,32 @@ class StreamEngine:
             except Exception as e:
                 logger.warning(f"Scheduled key refresh failed: {e}")
 
-    def _pre_convert_for_loop(self, playlist, target_resolution, config):
-        """Convert only videos that need rotation (landscape → portrait).
-        Returns list of file paths (converted or original) for concat demuxer.
-        Uses cached files to avoid re-conversion on reconnects."""
-        rotation_mode = config.get("rotation_mode", "auto")
-        converted = []
-
-        for video_path in playlist:
-            # Generate cache filename
-            cache_name = "rotated_" + os.path.basename(video_path).replace(".", "_").replace(" ", "_") + f"_{rotation_mode}"
-            converted_path = os.path.join(LOGS_DIR, cache_name + ".mp4")
-
-            # Check if this video needs rotation (landscape in portrait output mode)
-            needs_rotation = self._needs_rotation(video_path, rotation_mode)
-
-            if not needs_rotation:
-                # Portrait video: use original (no conversion needed)
-                converted.append(video_path)
-                continue
-
-            # Landscape video: check cache
-            if os.path.exists(converted_path):
-                converted.append(converted_path)
-                continue
-
-            # Convert landscape video: rotate 90° CW + scale to target
-            w, h = target_resolution.split("x")
-            scale_filter = f"transpose=1,scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:0:0:black"
-
-            # Check audio
-            has_audio = self._video_has_audio(video_path)
-
-            cmd = [
-                "ffmpeg", "-y",
-                "-i", video_path,
-                "-vf", scale_filter,
-                "-c:v", "libx264", "-preset", "superfast", "-crf", "23",
-                "-r", "30",
-                "-pix_fmt", "yuv420p",
-            ]
-            if has_audio:
-                cmd.extend(["-c:a", "aac", "-b:a", "128k"])
-            else:
-                cmd.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100", "-c:a", "aac", "-b:a", "128k"])
-            cmd.append(converted_path)
-
-            try:
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-                if result.returncode == 0 and os.path.exists(converted_path):
-                    logger.info(f"Rotated: {os.path.basename(video_path)} (landscape → portrait)")
-                    converted.append(converted_path)
-                    self._temp_files.append(converted_path)
-                else:
-                    logger.warning(f"Rotate failed for {video_path}: {result.stderr[:150]}")
-                    converted.append(video_path)
-            except Exception as e:
-                logger.warning(f"Rotate error for {video_path}: {e}")
-                converted.append(video_path)
-
-        return converted
-
-    def _needs_rotation(self, video_path, rotation_mode):
-        """Check if video needs rotation (landscape in portrait output)."""
-        if rotation_mode in ("portrait", "fixed"):
-            return False  # All videos assumed portrait, no rotation needed
-        if rotation_mode == "landscape":
-            return True   # All videos need rotation to landscape? No, we rotate landscape TO portrait
-        
-        # "auto" mode: check if video is landscape
-        try:
-            w_video, h_video = self._get_video_dimensions(video_path)
-            if w_video and h_video:
-                return w_video > h_video  # Landscape needs rotation
-        except:
-            pass
-        return False
-
-    def _get_video_dimensions(self, video_path):
-        """Get video width and height."""
-        try:
-            cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", video_path]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-            parts = result.stdout.strip().split(",")
-            if len(parts) >= 2:
-                return int(parts[0]), int(parts[1])
-        except:
-            pass
-        return None, None
-
-    def _video_has_audio(self, video_path):
-        """Check if video has an audio stream."""
-        try:
-            cmd = ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=codec_type", "-of", "csv=p=0", video_path]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-            return "audio" in result.stdout
-        except:
-            return False
-
     def _run_loop(self):
         while not self.should_stop:
             config = self.load_config()
-
-            # Fetch fresh stream key for this cycle (keys are single-use)
-            tiktok_session = config.get("tiktok_session", "").strip()
-            if tiktok_session and scraper and scraper.available:
-                try:
-                    logger.info("Fetching fresh stream key from TikTok...")
-                    fresh = scraper.fetch_stream_key_with_session(tiktok_session)
-                    if fresh and fresh.get("rtmp_url") and fresh.get("stream_key"):
-                        config["rtmp_url"] = fresh["rtmp_url"]
-                        config["stream_key"] = fresh["stream_key"]
-                        with open(CONFIG_FILE, "w") as f:
-                            json.dump(config, f, indent=2)
-                        logger.info("Fresh stream key fetched and saved!")
-                except Exception as e:
-                    logger.warning(f"Auto-fetch key failed: {e}")
-
-            # Rebuild fresh playlist on reconnect (reuse converted/normalized files)
             self._temp_files = []
-            loop_enabled = config.get("loop", True)
 
+            # Fetch fresh stream key only on first run or after an error.
+            # On clean playlist finish (exit 0), reuse the same key to avoid RTMP disconnect.
+            prev_exit_code = getattr(self, '_last_exit_code', None)
+            if prev_exit_code is None or prev_exit_code != 0:
+                tiktok_session = config.get("tiktok_session", "").strip()
+                if tiktok_session and scraper and scraper.available:
+                    try:
+                        logger.info("Fetching fresh stream key from TikTok...")
+                        fresh = scraper.fetch_stream_key_with_session(tiktok_session)
+                        if fresh and fresh.get("rtmp_url") and fresh.get("stream_key"):
+                            config["rtmp_url"] = fresh["rtmp_url"]
+                            config["stream_key"] = fresh["stream_key"]
+                            with open(CONFIG_FILE, "w") as f:
+                                json.dump(config, f, indent=2)
+                            logger.info("Fresh stream key fetched and saved!")
+                    except Exception as e:
+                        logger.warning(f"Auto-fetch key failed: {e}")
+
+            exit_code = -1
             try:
-                # build_ffmpeg_command writes playlist.txt via _write_playlist
                 cmd = self.build_ffmpeg_command(config)
-
-                # Start preview AFTER playlist.txt is written
                 self._start_preview(config)
 
                 logger.info(f"Launching FFmpeg Stream process (Target: {config.get('rtmp_url')})...")
@@ -848,7 +769,6 @@ class StreamEngine:
                     bufsize=1
                 )
 
-                # Read output logs line by line
                 for line in iter(self.process.stdout.readline, ''):
                     if not line:
                         break
@@ -858,41 +778,26 @@ class StreamEngine:
 
                 self.process.wait()
                 exit_code = self.process.returncode
+                self._last_exit_code = exit_code
                 logger.info(f"FFmpeg process exited with code: {exit_code}")
 
             except Exception as e:
                 self.last_error = str(e)
+                self._last_exit_code = -1
                 logger.error(f"Streaming error: {e}")
 
             if self.should_stop:
                 break
 
-            # Reconnect only on error (exit_code != 0). With -stream_loop -1 on concat demuxer,
-            # FFmpeg loops indefinitely and never exits normally. Exit 0 = unexpected, still reconnect.
-            if exit_code != 0 and config.get("auto_reconnect", True):
+            loop_enabled = config.get("loop", True)
+            # Reconnect on error OR when playlist finished normally (exit0) with loop enabled
+            should_reconnect = (exit_code != 0) or (exit_code == 0 and loop_enabled)
+            if should_reconnect and config.get("auto_reconnect", True):
                 self.reconnect_count += 1
-                # Rate limiting: if too many reconnects in short period, add backoff
-                now = time.time()
-                self._reconnect_timestamps.append(now)
-                # Keep only timestamps from last 60 seconds
-                self._reconnect_timestamps = [t for t in self._reconnect_timestamps if now - t < 60]
-
-                # Exponential backoff if reconnecting too frequently
-                reconnect_rate = len(self._reconnect_timestamps)
-                if reconnect_rate > 3:
-                    # More than 3 reconnects in 60s → add delay
-                    self._reconnect_backoff = min(reconnect_rate * 2, 10)  # max 10s
-                    wait_time = 2 + self._reconnect_backoff
-                    logger.warning(f"High reconnect rate ({reconnect_rate}/min), backing off {self._reconnect_backoff}s")
-                else:
-                    wait_time = 2
-                    self._reconnect_backoff = 0
-
-                logger.info(f"Auto-reconnecting stream (Attempt #{self.reconnect_count})... Waiting {wait_time} seconds.")
+                logger.info(f"Auto-reconnecting stream (Attempt #{self.reconnect_count})... Waiting 2 seconds.")
                 with self.lock:
                     self.status = "RECONNECTING"
-                # Re-check should_stop periodically during reconnect delay
-                for _ in range(int(wait_time * 10)):
+                for _ in range(20):
                     if self.should_stop:
                         break
                     time.sleep(0.1)
