@@ -356,11 +356,11 @@ class StreamEngine:
         v_bitrate = config.get("video_bitrate", "4000k")
         a_bitrate = config.get("audio_bitrate", "128k")
 
-        playlist_txt = os.path.join(LOGS_DIR, "playlist.txt")
+        playlist_txt = os.path.join(LOGS_DIR, "playlist_repeat.txt")
+        playlist_txt_single = os.path.join(LOGS_DIR, "playlist.txt")
         loop_enabled = config.get("loop", True)
 
         # Single video: use -stream_loop directly (no concat needed)
-        # Multiple videos: concat filter with -i per video (handles different resolutions)
         if len(compatible_playlist) == 1:
             cmd = [
                 "ffmpeg", "-y",
@@ -369,21 +369,32 @@ class StreamEngine:
                 "-stream_loop", "-1" if loop_enabled else "0",
                 "-i", compatible_playlist[0]
             ]
+            total_inputs = 1
+            input_indices = [0]
         else:
-            # Concat filter: frame-level concat, handles different codecs/resolutions
-            # No packet-level boundary issues
+            # Multi-video: merge into single file with rotation applied, then -stream_loop -1
+            # This avoids concat timing issues and keeps FFmpeg running indefinitely
+            merged_path = os.path.join(LOGS_DIR, "merged_loop.mp4")
+            if loop_enabled or not os.path.exists(merged_path):
+                self._merge_videos_for_loop(compatible_playlist, merged_path, resolution, config)
+
+            # Also write normal playlist.txt for preview fallback
+            with open(playlist_txt_single, "w") as f:
+                for vp in compatible_playlist:
+                    f.write(f"file '{vp}'\n")
+
             cmd = [
                 "ffmpeg", "-y",
                 "-fflags", "+genpts+igndts",
                 "-re",
+                "-stream_loop", "-1" if loop_enabled else "0",
+                "-i", merged_path
             ]
-            n = len(compatible_playlist)
-            for vp in compatible_playlist:
-                cmd.extend(["-i", vp])
+            total_inputs = 1
+            input_indices = [0]
 
         # Use overlay renderer for dynamic overlays
         w, h = resolution.split("x")
-        base_filter = f"scale={resolution}:force_original_aspect_ratio=decrease,pad={w}:{h}:0:0:black"
 
         # Apply overlay renderer settings from config
         overlay_renderer.set_enabled(config.get("overlay_enabled", True))
@@ -398,58 +409,25 @@ class StreamEngine:
         pw, ph = min(360, int(w)), min(640, int(h))
         preview_vf = f"scale={pw}:{ph}:force_original_aspect_ratio=decrease,pad={pw}:{ph}:0:0:black,fps=1/5"
 
-        if len(compatible_playlist) == 1:
-            if avatar_enabled and fifo_path and os.path.exists(fifo_path):
-                overlay_fps = overlay_renderer.get_overlay_fps()
-                cmd.extend([
-                    "-f", "image2pipe", "-vcodec", "png",
-                    "-framerate", str(overlay_fps),
-                    "-i", fifo_path
-                ])
-                rotation_mode = config.get("rotation_mode", "fixed")
-                input_vf = self._get_video_filter_for_input(compatible_playlist[0], resolution, rotation_mode)
-                filter_str = f"[0:v]{input_vf}[base];[1:v]scale={w}:{h}:flags=lanczos[ovr];[base][ovr]overlay=0:0:format=auto:eof_action=pass:repeatlast=1[vout];[vout]split=2[vmain][vprev_raw];[vprev_raw]{preview_vf}[vprev]"
-                cmd.extend(["-filter_complex", filter_str, "-map", "[vmain]", "-map", "0:a?"])
-            else:
-                # Single video, no overlay: use split for preview
-                rotation_mode = config.get("rotation_mode", "fixed")
-                vf = self._get_video_filter_for_input(compatible_playlist[0], resolution, rotation_mode)
-                filter_str = f"[0:v]{vf}[vout];[vout]split=2[vmain][vprev_raw];[vprev_raw]{preview_vf}[vprev]"
-                cmd.extend(["-filter_complex", filter_str, "-map", "[vmain]", "-map", "0:a?"])
+        rotation_mode = config.get("rotation_mode", "auto")
+
+        # All cases now use single input (single video or merged loop file)
+        # Rotation is baked into the source/merged file
+        if avatar_enabled and fifo_path and os.path.exists(fifo_path):
+            overlay_fps = overlay_renderer.get_overlay_fps()
+            cmd.extend([
+                "-f", "image2pipe", "-vcodec", "png",
+                "-framerate", str(overlay_fps),
+                "-i", fifo_path
+            ])
+            # [0:v] is the pre-converted/merged video (already rotated to target res)
+            # [1:v] is the overlay avatar stream
+            filter_str = f"[0:v]null[base];[1:v]scale={w}:{h}:flags=lanczos[ovr];[base][ovr]overlay=0:0:format=auto:eof_action=pass:repeatlast=1[vout];[vout]split=2[vmain][vprev_raw];[vprev_raw]{preview_vf}[vprev]"
+            cmd.extend(["-filter_complex", filter_str, "-map", "[vmain]", "-map", "0:a?"])
         else:
-            # Multi-video: concat filter with optional overlay
-            n = len(compatible_playlist)
-            if avatar_enabled and fifo_path and os.path.exists(fifo_path):
-                overlay_fps = overlay_renderer.get_overlay_fps()
-                cmd.extend([
-                    "-f", "image2pipe", "-vcodec", "png",
-                    "-framerate", str(overlay_fps),
-                    "-i", fifo_path
-                ])
-                # Scale each input → concat → overlay → split for preview
-                filter_str = ""
-                n = len(compatible_playlist)
-                rotation_mode = config.get("rotation_mode", "fixed")
-                for i in range(n):
-                    vf = self._get_video_filter_for_input(compatible_playlist[i], resolution, rotation_mode)
-                    filter_str += f"[{i}:v]{vf}[v{i}];[{i}:a]aresample=44100,aformat=channel_layouts=stereo[va{i}];"
-                # Interleave video/audio inputs for concat filter
-                concat_inputs = "".join(f"[v{i}][va{i}]" for i in range(n))
-                overlay_idx = n
-                filter_str += f"{concat_inputs}concat=n={n}:v=1:a=1[vconcat][aconcat];[{overlay_idx}:v]scale={w}:{h}:flags=lanczos[ovr];[vconcat][ovr]overlay=0:0:format=auto:eof_action=pass:repeatlast=1[vout];[vout]split=2[vmain][vprev_raw];[vprev_raw]{preview_vf}[vprev]"
-                cmd.extend(["-filter_complex", filter_str, "-map", "[vmain]", "-map", "[aconcat]"])
-            else:
-                # No overlay: concat filter only
-                filter_str = ""
-                n = len(compatible_playlist)
-                rotation_mode = config.get("rotation_mode", "fixed")
-                for i in range(n):
-                    vf = self._get_video_filter_for_input(compatible_playlist[i], resolution, rotation_mode)
-                    filter_str += f"[{i}:v]{vf}[v{i}];[{i}:a]aresample=44100,aformat=channel_layouts=stereo[va{i}];"
-                # Interleave video/audio inputs for concat filter
-                concat_inputs = "".join(f"[v{i}][va{i}]" for i in range(n))
-                filter_str += f"{concat_inputs}concat=n={n}:v=1:a=1[vout][aout];[vout]split=2[vmain][vprev_raw];[vprev_raw]{preview_vf}[vprev]"
-                cmd.extend(["-filter_complex", filter_str, "-map", "[vmain]", "-map", "[aout]"])
+            # Single input: just split for preview
+            filter_str = f"[0:v]null[vout];[vout]split=2[vmain][vprev_raw];[vprev_raw]{preview_vf}[vprev]"
+            cmd.extend(["-filter_complex", filter_str, "-map", "[vmain]", "-map", "0:a?"])
 
         # Preview output: JPEG from same filter pipeline (perfect sync with stream)
         # Main output encode settings
@@ -727,6 +705,131 @@ class StreamEngine:
             except Exception as e:
                 logger.warning(f"Scheduled key refresh failed: {e}")
 
+    def _pre_convert_videos(self, playlist, target_resolution, config):
+        """Convert each video to target resolution + orientation, return list of pre-converted paths."""
+        w, h = target_resolution.split("x")
+        rotation_mode = config.get("rotation_mode", "auto")
+        converted = []
+
+        for video_path in playlist:
+            # Check if already converted (temp file exists and matches this source)
+            cache_key = os.path.basename(video_path).replace(".", "_").replace(" ", "_") + f"_{target_resolution}_{rotation_mode}"
+            converted_path = os.path.join(LOGS_DIR, f"converted_{cache_key}.mp4")
+
+            if os.path.exists(converted_path):
+                converted.append(converted_path)
+                continue
+
+            # Determine orientation and build filter
+            is_portrait = self._get_video_orientation(video_path, rotation_mode)
+            scale_filter = f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:x=(ow-iw)/2:y=(oh-ih)/2:color=black"
+
+            # For landscape videos in portrait output: rotate 90° to fill frame
+            if not is_portrait and rotation_mode in ("auto", "landscape"):
+                scale_filter = f"transpose=1,{scale_filter}"
+
+            # Check audio
+            has_audio = self._video_has_audio(video_path)
+
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", video_path,
+                "-vf", scale_filter,
+                "-c:v", "libx264", "-preset", "superfast", "-crf", "23",
+                "-r", "30",
+                "-pix_fmt", "yuv420p",
+            ]
+
+            if has_audio:
+                cmd.extend(["-c:a", "aac", "-b:a", "128k"])
+            else:
+                cmd.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100", "-c:a", "aac", "-b:a", "128k"])
+
+            cmd.append(converted_path)
+
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                if result.returncode == 0 and os.path.exists(converted_path):
+                    logger.info(f"Pre-converted: {os.path.basename(video_path)} to {target_resolution}")
+                    converted.append(converted_path)
+                    self._temp_files.append(converted_path)
+                else:
+                    logger.warning(f"Pre-convert failed for {video_path}: {result.stderr[:200]}")
+                    converted.append(video_path)
+            except Exception as e:
+                logger.warning(f"Pre-convert error for {video_path}: {e}")
+                converted.append(video_path)
+
+        return converted
+
+    def _get_video_orientation_v2(self, video_path, rotation_mode):
+        """Determine if video is portrait (True) or landscape (False)."""
+        if rotation_mode == "portrait":
+            return True
+        if rotation_mode == "landscape":
+            return False
+        if rotation_mode == "fixed":
+            return True  # Assume portrait output
+
+        # "auto" mode: detect via ffprobe
+        try:
+            cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", video_path]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            parts = result.stdout.strip().split(",")
+            if len(parts) >= 2:
+                width, height = int(parts[0]), int(parts[1])
+                return width < height
+        except:
+            pass
+        return True
+
+    def _merge_videos_for_loop(self, playlist, output_path, target_resolution, config):
+        """Merge multiple videos into one file with rotation applied. Uses concat filter."""
+        w, h = target_resolution.split("x")
+        rotation_mode = config.get("rotation_mode", "auto")
+
+        # Build FFmpeg command to merge with rotation per-video
+        inputs = []
+        input_vf_filters = []
+        input_audio_filters = []
+        n = len(playlist)
+
+        cmd = ["ffmpeg", "-y"]
+        for i, vp in enumerate(playlist):
+            cmd.extend(["-i", vp])
+
+        for i in range(n):
+            vf = self._get_video_filter_for_input(playlist[i], target_resolution, rotation_mode)
+            input_vf_filters.append(f"[{i}:v]{vf}[v{i}]")
+            input_audio_filters.append(f"[{i}:a]aresample=44100,aformat=channel_layouts=stereo[va{i}]")
+
+        concat_inputs = "".join(f"[v{i}][va{i}]" for i in range(n))
+        filter_str = ";".join(input_vf_filters + input_audio_filters)
+        filter_str += f";{concat_inputs}concat=n={n}:v=1:a=1[vout][aout]"
+
+        cmd.extend([
+            "-filter_complex", filter_str,
+            "-map", "[vout]", "-map", "[aout]",
+            "-c:v", "libx264", "-preset", "superfast", "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "128k",
+            "-r", "30",
+            output_path
+        ])
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            if result.returncode == 0 and os.path.exists(output_path):
+                logger.info(f"Merged {n} videos into loop file ({os.path.getsize(output_path) // 1024 // 1024}MB)")
+                self._temp_files.append(output_path)
+                return output_path
+            else:
+                logger.error(f"Merge failed: {result.stderr[:300]}")
+                return None
+        except Exception as e:
+            logger.error(f"Merge error: {e}")
+            return None
+
     def _run_loop(self):
         while not self.should_stop:
             config = self.load_config()
@@ -791,10 +894,9 @@ class StreamEngine:
             if self.should_stop:
                 break
 
-            # Reconnect on error OR when playlist finished normally (exit0) with loop enabled
-            # (single video uses -stream_loop which never exits 0, so this mainly affects multi-video concat)
-            should_reconnect = (exit_code != 0) or (exit_code == 0 and loop_enabled)
-            if should_reconnect and config.get("auto_reconnect", True):
+            # Reconnect only on error (exit_code != 0). With -stream_loop -1 on concat demuxer,
+            # FFmpeg loops indefinitely and never exits normally. Exit 0 = unexpected, still reconnect.
+            if exit_code != 0 and config.get("auto_reconnect", True):
                 self.reconnect_count += 1
                 # Rate limiting: if too many reconnects in short period, add backoff
                 now = time.time()
