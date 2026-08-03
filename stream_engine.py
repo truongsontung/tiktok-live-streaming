@@ -55,7 +55,7 @@ logger = logging.getLogger("StreamEngine")
 class StreamEngine:
     def __init__(self):
         self.process = None
-        self.preview_process = None
+        # self.preview_process = None  # Preview now embedded in main FFmpeg
         self.is_running = False
         self.should_stop = False
         self.status = "STOPPED"  # STOPPED, STREAMING, RECONNECTING, ERROR
@@ -292,8 +292,8 @@ class StreamEngine:
         playlist_txt = os.path.join(LOGS_DIR, "playlist.txt")
         loop_enabled = config.get("loop", True)
 
-        # Single video: use -stream_loop directly (concat demuxer skips duplicate entries)
-        # Multiple videos: use concat demuxer with repeated entries
+        # Single video: use -stream_loop directly (no concat needed)
+        # Multiple videos: concat filter with -i per video (handles different resolutions)
         if len(compatible_playlist) == 1:
             cmd = [
                 "ffmpeg", "-y",
@@ -303,19 +303,20 @@ class StreamEngine:
                 "-i", compatible_playlist[0]
             ]
         else:
+            # Concat filter: frame-level concat, handles different codecs/resolutions
+            # No packet-level boundary issues
             cmd = [
                 "ffmpeg", "-y",
                 "-fflags", "+genpts+igndts",
                 "-re",
-                "-f", "concat",
-                "-safe", "0",
-                "-i", playlist_txt
             ]
+            n = len(compatible_playlist)
+            for vp in compatible_playlist:
+                cmd.extend(["-i", vp])
 
         # Use overlay renderer for dynamic overlays
-        # Scale and pad: resize to fit, then pad to exact resolution (centered)
         w, h = resolution.split("x")
-        filter_str = f"scale={resolution}:force_original_aspect_ratio=decrease,pad={w}:{h}:0:0:black"
+        base_filter = f"scale={resolution}:force_original_aspect_ratio=decrease,pad={w}:{h}:0:0:black"
 
         # Apply overlay renderer settings from config
         overlay_renderer.set_enabled(config.get("overlay_enabled", True))
@@ -323,41 +324,80 @@ class StreamEngine:
         if overlay_config and isinstance(overlay_config, dict):
             overlay_renderer.configure_overlays(overlay_config)
 
-        # Avatar image overlay (via FIFO pipe from overlay_renderer)
         avatar_enabled = overlay_renderer.enabled_overlays.get("avatar_overlay", False)
         fifo_path = overlay_renderer.get_overlay_fifo_path()
 
-        if avatar_enabled and fifo_path and os.path.exists(fifo_path):
-            overlay_fps = overlay_renderer.get_overlay_fps()
-            cmd.extend([
-                "-f", "image2pipe", "-vcodec", "png",
-                "-framerate", str(overlay_fps),
-                "-i", fifo_path
-            ])
-            # repeatlast=1: hold last frame when overlay thread drops frames
-            # eof_action=pass: continue base video if FIFO closes
-            # Scale 180x320 overlay up to video resolution before compositing
-            filter_str = f"[0:v]{filter_str}[base];[1:v]scale={w}:{h}:flags=lanczos[ovr];[base][ovr]overlay=0:0:format=auto:eof_action=pass:repeatlast=1[vout]"
-            cmd.extend(["-filter_complex", filter_str, "-map", "[vout]", "-map", "0:a?"])
-        else:
-            cmd.extend(["-vf", filter_str])
+        # Preview dimensions (embedded in main FFmpeg for sync)
+        pw, ph = min(360, int(w)), min(640, int(h))
+        preview_vf = f"scale={pw}:{ph}:force_original_aspect_ratio=decrease,pad={pw}:{ph}:0:0:black,fps=1/5"
 
+        if len(compatible_playlist) == 1:
+            if avatar_enabled and fifo_path and os.path.exists(fifo_path):
+                overlay_fps = overlay_renderer.get_overlay_fps()
+                cmd.extend([
+                    "-f", "image2pipe", "-vcodec", "png",
+                    "-framerate", str(overlay_fps),
+                    "-i", fifo_path
+                ])
+                filter_str = f"[0:v]{base_filter}[base];[1:v]scale={w}:{h}:flags=lanczos[ovr];[base][ovr]overlay=0:0:format=auto:eof_action=pass:repeatlast=1[vout];[vout]split=2[vmain][vprev_raw];[vprev_raw]{preview_vf}[vprev]"
+                cmd.extend(["-filter_complex", filter_str, "-map", "[vmain]", "-map", "0:a?"])
+            else:
+                # Single video, no overlay: use split for preview
+                filter_str = f"[0:v]{base_filter},setsar=1,format=yuv420p[vout];[vout]split=2[vmain][vprev_raw];[vprev_raw]{preview_vf}[vprev]"
+                cmd.extend(["-filter_complex", filter_str, "-map", "[vmain]", "-map", "0:a?"])
+        else:
+            # Multi-video: concat filter with optional overlay
+            n = len(compatible_playlist)
+            if avatar_enabled and fifo_path and os.path.exists(fifo_path):
+                overlay_fps = overlay_renderer.get_overlay_fps()
+                cmd.extend([
+                    "-f", "image2pipe", "-vcodec", "png",
+                    "-framerate", str(overlay_fps),
+                    "-i", fifo_path
+                ])
+                # Scale each input → concat → overlay → split for preview
+                filter_str = ""
+                for i in range(n):
+                    filter_str += f"[{i}:v]{base_filter},fps=30,format=yuv420p,setsar=1[v{i}];[{i}:a]aresample=44100,aformat=channel_layouts=stereo[va{i}];"
+                # Interleave video/audio inputs for concat filter
+                concat_inputs = "".join(f"[v{i}][va{i}]" for i in range(n))
+                overlay_idx = n
+                filter_str += f"{concat_inputs}concat=n={n}:v=1:a=1[vconcat][aconcat];[{overlay_idx}:v]scale={w}:{h}:flags=lanczos[ovr];[vconcat][ovr]overlay=0:0:format=auto:eof_action=pass:repeatlast=1[vout];[vout]split=2[vmain][vprev_raw];[vprev_raw]{preview_vf}[vprev]"
+                cmd.extend(["-filter_complex", filter_str, "-map", "[vmain]", "-map", "[aconcat]"])
+            else:
+                # No overlay: concat filter only
+                filter_str = ""
+                for i in range(n):
+                    filter_str += f"[{i}:v]{base_filter},fps=30,format=yuv420p,setsar=1[v{i}];[{i}:a]aresample=44100,aformat=channel_layouts=stereo[va{i}];"
+                # Interleave video/audio inputs for concat filter
+                concat_inputs = "".join(f"[v{i}][va{i}]" for i in range(n))
+                filter_str += f"{concat_inputs}concat=n={n}:v=1:a=1[vout][aout];[vout]split=2[vmain][vprev_raw];[vprev_raw]{preview_vf}[vprev]"
+                cmd.extend(["-filter_complex", filter_str, "-map", "[vmain]", "-map", "[aout]"])
+
+        # Preview output: JPEG from same filter pipeline (perfect sync with stream)
+        # Main output encode settings
         cmd.extend([
-            "-c:v", "libx264",
+            "-c:v:0", "libx264",
             "-preset", "superfast",
             "-tune", "zerolatency",
             "-g", str(fps),
-            "-b:v", v_bitrate,
-            "-maxrate", v_bitrate,
-            "-bufsize", v_bitrate,
-            "-pix_fmt", "yuv420p",
+            "-b:v:0", v_bitrate,
+            "-maxrate:v:0", v_bitrate,
+            "-bufsize:v:0", v_bitrate,
+            "-pix_fmt:v:0", "yuv420p",
             "-c:a", "aac",
             "-b:a", a_bitrate,
             "-ar", "44100",
             "-ac", "2",
             "-f", "flv",
             "-flvflags", "no_duration_filesize",
-            target
+            target,
+            # Preview JPEG output (from filter_complex [vprev] label)
+            "-map", "[vprev]",
+            "-c:v:1", "mjpeg",
+            "-update", "1",
+            "-q:v", "3",
+            "/tmp/preview.jpg",
         ])
 
         return cmd
@@ -496,73 +536,21 @@ class StreamEngine:
                 final_playlist.append(audio_path if os.path.exists(audio_path) else video_path)
 
         if final_playlist:
-            # Write playlist entries — loop by repeating entries (concat demuxer doesn't support -stream_loop)
-            loop_enabled = config.get("loop", True)
-            repeat_count = 200 if loop_enabled else 1
+            # Write playlist.txt (for preview) — concat filter is used in build_ffmpeg_command
+            # Looping for multi-video is handled by _run_loop reconnect (exit0 → restart)
             with open(playlist_txt, "w") as f:
-                for _ in range(repeat_count):
-                    for video_path in final_playlist:
-                        f.write(f"file '{video_path}'\n")
+                for video_path in final_playlist:
+                    f.write(f"file '{video_path}'\n")
         return final_playlist
 
     def _start_preview(self, config):
-        """Start a lightweight FFmpeg process for dashboard preview."""
-        self._stop_preview()
-        try:
-            playlist = self.get_media_playlist()
-            if not playlist:
-                return
-
-            resolution = config.get("resolution", "720x1280")
-            w, h = resolution.split("x")
-            pw, ph = min(360, int(w)), min(640, int(h))
-            filter_str = f"scale={pw}:{ph}:force_original_aspect_ratio=decrease,pad={pw}:{ph}:0:0:black,fps=1"
-            loop_enabled = config.get("loop", True)
-
-            if len(playlist) == 1:
-                cmd = [
-                    "ffmpeg", "-y", "-re",
-                    "-stream_loop", "-1" if loop_enabled else "0",
-                    "-i", playlist[0],
-                    "-vf", filter_str,
-                    "-update", "1", "-q:v", "3",
-                    "/tmp/preview.jpg",
-                ]
-            else:
-                playlist_txt = os.path.join(LOGS_DIR, "playlist.txt")
-                if not os.path.exists(playlist_txt):
-                    return
-                cmd = [
-                    "ffmpeg", "-y", "-re",
-                    "-f", "concat", "-safe", "0",
-                    "-i", playlist_txt,
-                    "-vf", filter_str,
-                    "-update", "1", "-q:v", "3",
-                    "/tmp/preview.jpg",
-                ]
-
-            self.preview_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            logger.info("Preview process started (snapshot for dashboard)")
-        except Exception as e:
-            logger.debug(f"Preview start error: {e}")
+        """Preview is now embedded in the main FFmpeg command for sync.
+        Kept as no-op for backward compatibility (called from _run_loop)."""
+        pass
 
     def _stop_preview(self):
-        if self.preview_process:
-            try:
-                self.preview_process.terminate()
-                try:
-                    self.preview_process.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    self.preview_process.kill()
-                    self.preview_process.wait(timeout=2)
-            except Exception as e:
-                logger.debug(f"Preview stop error: {e}")
-            self.preview_process = None
-        # Kill orphan preview FFmpeg (leak from crashed/older runs -> CPU full -> stream jitter)
-        try:
-            subprocess.run(["pkill", "-9", "-f", "scale=360:640"], capture_output=True)
-        except Exception:
-            pass
+        """Preview is now embedded in main FFmpeg — no separate process to stop."""
+        pass
 
     def stop_stream(self):
         with self.lock:
@@ -589,9 +577,6 @@ class StreamEngine:
         # Reap any remaining zombie ffmpeg/preview processes
         if self.process:
             try: self.process.wait(timeout=2)
-            except: pass
-        if self.preview_process:
-            try: self.preview_process.wait(timeout=2)
             except: pass
 
         # Stop avatar overlay FIFO
@@ -684,11 +669,8 @@ class StreamEngine:
                 except Exception as e:
                     logger.warning(f"Auto-fetch key failed: {e}")
 
-            # Rebuild fresh playlist + audioadded files on each reconnect
+            # Rebuild fresh playlist on reconnect (reuse converted/normalized files)
             self._temp_files = []
-            for tmp in glob.glob(os.path.join(LOGS_DIR, "audioadded_*")) + glob.glob(os.path.join(LOGS_DIR, "converted_*")):
-                try: os.remove(tmp)
-                except: pass
 
             try:
                 # build_ffmpeg_command writes playlist.txt via _write_playlist
@@ -731,8 +713,10 @@ class StreamEngine:
             if self.should_stop:
                 break
 
-            # Only auto-reconnect on error (non-zero exit). Code 0 = normal EOF (playlist finished).
-            if exit_code != 0 and config.get("auto_reconnect", True):
+            # Reconnect on error OR when playlist finished normally (exit0) with loop enabled
+            # (single video uses -stream_loop which never exits 0, so this mainly affects multi-video concat)
+            should_reconnect = (exit_code != 0) or (exit_code == 0 and loop_enabled)
+            if should_reconnect and config.get("auto_reconnect", True):
                 self.reconnect_count += 1
                 logger.info(f"Auto-reconnecting stream (Attempt #{self.reconnect_count})... Waiting 5 seconds.")
                 with self.lock:
