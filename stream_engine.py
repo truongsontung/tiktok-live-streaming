@@ -67,8 +67,9 @@ class StreamEngine:
         self.comment_processor_thread = None
         self._comment_stop_event = threading.Event()
         self._key_refresh_thread = None
-
         self._last_viewer_count: int = 0
+        self._reconnect_timestamps = []  # Track reconnect times for rate limiting
+        self._reconnect_backoff = 0  # Exponential backoff seconds
 
         # Configure callbacks from live client
         live_client.on_comment_callbacks.append(self._handle_live_comment)
@@ -795,11 +796,28 @@ class StreamEngine:
             should_reconnect = (exit_code != 0) or (exit_code == 0 and loop_enabled)
             if should_reconnect and config.get("auto_reconnect", True):
                 self.reconnect_count += 1
-                logger.info(f"Auto-reconnecting stream (Attempt #{self.reconnect_count})... Waiting 2 seconds.")
+                # Rate limiting: if too many reconnects in short period, add backoff
+                now = time.time()
+                self._reconnect_timestamps.append(now)
+                # Keep only timestamps from last 60 seconds
+                self._reconnect_timestamps = [t for t in self._reconnect_timestamps if now - t < 60]
+
+                # Exponential backoff if reconnecting too frequently
+                reconnect_rate = len(self._reconnect_timestamps)
+                if reconnect_rate > 3:
+                    # More than 3 reconnects in 60s → add delay
+                    self._reconnect_backoff = min(reconnect_rate * 2, 10)  # max 10s
+                    wait_time = 2 + self._reconnect_backoff
+                    logger.warning(f"High reconnect rate ({reconnect_rate}/min), backing off {self._reconnect_backoff}s")
+                else:
+                    wait_time = 2
+                    self._reconnect_backoff = 0
+
+                logger.info(f"Auto-reconnecting stream (Attempt #{self.reconnect_count})... Waiting {wait_time} seconds.")
                 with self.lock:
                     self.status = "RECONNECTING"
                 # Re-check should_stop periodically during reconnect delay
-                for _ in range(20):  # 2 seconds instead of 5
+                for _ in range(int(wait_time * 10)):
                     if self.should_stop:
                         break
                     time.sleep(0.1)
