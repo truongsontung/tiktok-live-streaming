@@ -208,32 +208,43 @@ class StreamEngine:
 
     def _get_target_resolution(self, config, playlist=None):
         """Get target resolution based on rotation_mode config:
-        - 'auto': detect orientation from ALL videos, use landscape if ANY is landscape
-        - 'portrait': always use portrait resolution
-        - 'landscape': always use landscape resolution
+        - 'auto': detect orientation per video. Portrait videos → 720x1280,
+          landscape videos get rotated 90° to fill portrait frame.
+          Output is always portrait (720x1280) to match phone orientation.
+        - 'portrait': always use portrait resolution (720x1280)
+        - 'landscape': always use landscape resolution (1280x720)
         - 'fixed'/'custom': use config resolution as-is"""
         rotation_mode = config.get("rotation_mode", "fixed")
         config_res = config.get("resolution", "720x1280")
 
-        if rotation_mode in ("auto", "portrait", "landscape") and playlist:
-            if rotation_mode == "portrait":
-                orientation = "portrait"
-            elif rotation_mode == "landscape":
-                orientation = "landscape"
-            else:
-                # auto: check if ANY video is landscape → use landscape for all
-                # (TikTok Live stream needs a single fixed orientation)
-                orientation = "portrait"
-                for video_path in playlist:
-                    if self._get_video_orientation(video_path) == "landscape":
-                        orientation = "landscape"
-                        break
-
-            if orientation == "portrait":
-                return "720x1280"
+        if rotation_mode == "auto":
+            # Auto mode: always output portrait (phone orientation)
+            # Landscape videos will be rotated 90° in the filter chain
+            return "720x1280"
+        elif rotation_mode == "portrait":
+            return "720x1280"
+        elif rotation_mode == "landscape":
             return "1280x720"
 
         return config_res
+
+    def _get_video_filter_for_input(self, video_path, target_resolution, rotation_mode):
+        """Build per-video filter chain that handles rotation.
+        For 'auto' mode, landscape videos get transposed to fit portrait frame.
+        For other modes, videos are simply scaled to target."""
+        w, h = target_resolution.split("x")
+        base_filter = f"scale={target_resolution}:force_original_aspect_ratio=decrease,pad={w}:{h}:0:0:black"
+
+        if rotation_mode != "auto":
+            return f"{base_filter},fps=30,format=yuv420p,setsar=1"
+
+        orientation = self._get_video_orientation(video_path)
+        if orientation == "portrait":
+            return f"{base_filter},fps=30,format=yuv420p,setsar=1"
+        else:
+            # Landscape: rotate 90° counterclockwise so it fills the portrait frame
+            # transpose=1 = 90° clockwise, transpose=2 = 90° counterclockwise
+            return f"transpose=1,{base_filter},fps=30,format=yuv420p,setsar=1"
 
     def _ensure_audio(self, video_path, output_path):
         """Add silent audio track to a video if it has none (for concat compatibility)."""
@@ -394,11 +405,15 @@ class StreamEngine:
                     "-framerate", str(overlay_fps),
                     "-i", fifo_path
                 ])
-                filter_str = f"[0:v]{base_filter}[base];[1:v]scale={w}:{h}:flags=lanczos[ovr];[base][ovr]overlay=0:0:format=auto:eof_action=pass:repeatlast=1[vout];[vout]split=2[vmain][vprev_raw];[vprev_raw]{preview_vf}[vprev]"
+                rotation_mode = config.get("rotation_mode", "fixed")
+                input_vf = self._get_video_filter_for_input(compatible_playlist[0], resolution, rotation_mode)
+                filter_str = f"[0:v]{input_vf}[base];[1:v]scale={w}:{h}:flags=lanczos[ovr];[base][ovr]overlay=0:0:format=auto:eof_action=pass:repeatlast=1[vout];[vout]split=2[vmain][vprev_raw];[vprev_raw]{preview_vf}[vprev]"
                 cmd.extend(["-filter_complex", filter_str, "-map", "[vmain]", "-map", "0:a?"])
             else:
                 # Single video, no overlay: use split for preview
-                filter_str = f"[0:v]{base_filter},setsar=1,format=yuv420p[vout];[vout]split=2[vmain][vprev_raw];[vprev_raw]{preview_vf}[vprev]"
+                rotation_mode = config.get("rotation_mode", "fixed")
+                vf = self._get_video_filter_for_input(compatible_playlist[0], resolution, rotation_mode)
+                filter_str = f"[0:v]{vf}[vout];[vout]split=2[vmain][vprev_raw];[vprev_raw]{preview_vf}[vprev]"
                 cmd.extend(["-filter_complex", filter_str, "-map", "[vmain]", "-map", "0:a?"])
         else:
             # Multi-video: concat filter with optional overlay
@@ -412,8 +427,11 @@ class StreamEngine:
                 ])
                 # Scale each input → concat → overlay → split for preview
                 filter_str = ""
+                n = len(compatible_playlist)
+                rotation_mode = config.get("rotation_mode", "fixed")
                 for i in range(n):
-                    filter_str += f"[{i}:v]{base_filter},fps=30,format=yuv420p,setsar=1[v{i}];[{i}:a]aresample=44100,aformat=channel_layouts=stereo[va{i}];"
+                    vf = self._get_video_filter_for_input(compatible_playlist[i], resolution, rotation_mode)
+                    filter_str += f"[{i}:v]{vf}[v{i}];[{i}:a]aresample=44100,aformat=channel_layouts=stereo[va{i}];"
                 # Interleave video/audio inputs for concat filter
                 concat_inputs = "".join(f"[v{i}][va{i}]" for i in range(n))
                 overlay_idx = n
@@ -422,8 +440,11 @@ class StreamEngine:
             else:
                 # No overlay: concat filter only
                 filter_str = ""
+                n = len(compatible_playlist)
+                rotation_mode = config.get("rotation_mode", "fixed")
                 for i in range(n):
-                    filter_str += f"[{i}:v]{base_filter},fps=30,format=yuv420p,setsar=1[v{i}];[{i}:a]aresample=44100,aformat=channel_layouts=stereo[va{i}];"
+                    vf = self._get_video_filter_for_input(compatible_playlist[i], resolution, rotation_mode)
+                    filter_str += f"[{i}:v]{vf}[v{i}];[{i}:a]aresample=44100,aformat=channel_layouts=stereo[va{i}];"
                 # Interleave video/audio inputs for concat filter
                 concat_inputs = "".join(f"[v{i}][va{i}]" for i in range(n))
                 filter_str += f"{concat_inputs}concat=n={n}:v=1:a=1[vout][aout];[vout]split=2[vmain][vprev_raw];[vprev_raw]{preview_vf}[vprev]"
