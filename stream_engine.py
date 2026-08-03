@@ -747,6 +747,7 @@ class StreamEngine:
 
             # Rebuild fresh playlist on reconnect (reuse converted/normalized files)
             self._temp_files = []
+            loop_enabled = config.get("loop", True)
 
             try:
                 # build_ffmpeg_command writes playlist.txt via _write_playlist
