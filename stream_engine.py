@@ -356,11 +356,11 @@ class StreamEngine:
         v_bitrate = config.get("video_bitrate", "4000k")
         a_bitrate = config.get("audio_bitrate", "128k")
 
-        playlist_txt = os.path.join(LOGS_DIR, "playlist_repeat.txt")
-        playlist_txt_single = os.path.join(LOGS_DIR, "playlist.txt")
+        playlist_txt = os.path.join(LOGS_DIR, "playlist.txt")
         loop_enabled = config.get("loop", True)
 
         # Single video: use -stream_loop directly (no concat needed)
+        # Multiple videos: concat demuxer with repeated entries + -stream_loop (loops indefinitely)
         if len(compatible_playlist) == 1:
             cmd = [
                 "ffmpeg", "-y",
@@ -369,29 +369,25 @@ class StreamEngine:
                 "-stream_loop", "-1" if loop_enabled else "0",
                 "-i", compatible_playlist[0]
             ]
-            total_inputs = 1
-            input_indices = [0]
         else:
-            # Multi-video: merge into single file with rotation applied, then -stream_loop -1
-            # This avoids concat timing issues and keeps FFmpeg running indefinitely
-            merged_path = os.path.join(LOGS_DIR, "merged_loop.mp4")
-            if loop_enabled or not os.path.exists(merged_path):
-                self._merge_videos_for_loop(compatible_playlist, merged_path, resolution, config)
-
-            # Also write normal playlist.txt for preview fallback
-            with open(playlist_txt_single, "w") as f:
-                for vp in compatible_playlist:
-                    f.write(f"file '{vp}'\n")
+            # Pre-convert videos that need rotation (landscape → portrait for portrait output)
+            pre_converted = self._pre_convert_for_loop(compatible_playlist, resolution, config)
+            # Write playlist with repeated entries for looping (concat demuxer + -stream_loop)
+            repeat_count = 200 if loop_enabled else 1
+            with open(playlist_txt, "w") as f:
+                for _ in range(repeat_count):
+                    for vp in pre_converted:
+                        f.write(f"file '{vp}'\n")
 
             cmd = [
                 "ffmpeg", "-y",
                 "-fflags", "+genpts+igndts",
                 "-re",
+                "-f", "concat",
+                "-safe", "0",
                 "-stream_loop", "-1" if loop_enabled else "0",
-                "-i", merged_path
+                "-i", playlist_txt,
             ]
-            total_inputs = 1
-            input_indices = [0]
 
         # Use overlay renderer for dynamic overlays
         w, h = resolution.split("x")
@@ -479,7 +475,10 @@ class StreamEngine:
             # Wait for any previous _run_loop thread to fully exit
             if self.monitor_thread and self.monitor_thread.is_alive():
                 self.should_stop = True
-                self.monitor_thread.join(timeout=5)
+                self.monitor_thread.join(timeout=15)
+                if self.monitor_thread.is_alive():
+                    logger.warning("Previous _run_loop thread did not exit, force killing")
+                    self.process = None
 
             self.should_stop = False
             self._comment_stop_event.clear()
@@ -655,8 +654,9 @@ class StreamEngine:
                     os.remove(temp_file)
                 except:
                     pass
-        # Clean up audioadded + converted temp files
-        for tmp in glob.glob(os.path.join(LOGS_DIR, "audioadded_*")) + glob.glob(os.path.join(LOGS_DIR, "converted_*")):
+
+        # Clean up rotated temp files
+        for tmp in glob.glob(os.path.join(LOGS_DIR, "rotated_*")):
             try:
                 os.remove(tmp)
             except:
@@ -705,28 +705,34 @@ class StreamEngine:
             except Exception as e:
                 logger.warning(f"Scheduled key refresh failed: {e}")
 
-    def _pre_convert_videos(self, playlist, target_resolution, config):
-        """Convert each video to target resolution + orientation, return list of pre-converted paths."""
-        w, h = target_resolution.split("x")
+    def _pre_convert_for_loop(self, playlist, target_resolution, config):
+        """Convert only videos that need rotation (landscape → portrait).
+        Returns list of file paths (converted or original) for concat demuxer.
+        Uses cached files to avoid re-conversion on reconnects."""
         rotation_mode = config.get("rotation_mode", "auto")
         converted = []
 
         for video_path in playlist:
-            # Check if already converted (temp file exists and matches this source)
-            cache_key = os.path.basename(video_path).replace(".", "_").replace(" ", "_") + f"_{target_resolution}_{rotation_mode}"
-            converted_path = os.path.join(LOGS_DIR, f"converted_{cache_key}.mp4")
+            # Generate cache filename
+            cache_name = "rotated_" + os.path.basename(video_path).replace(".", "_").replace(" ", "_") + f"_{rotation_mode}"
+            converted_path = os.path.join(LOGS_DIR, cache_name + ".mp4")
 
+            # Check if this video needs rotation (landscape in portrait output mode)
+            needs_rotation = self._needs_rotation(video_path, rotation_mode)
+
+            if not needs_rotation:
+                # Portrait video: use original (no conversion needed)
+                converted.append(video_path)
+                continue
+
+            # Landscape video: check cache
             if os.path.exists(converted_path):
                 converted.append(converted_path)
                 continue
 
-            # Determine orientation and build filter
-            is_portrait = self._get_video_orientation(video_path, rotation_mode)
-            scale_filter = f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:x=(ow-iw)/2:y=(oh-ih)/2:color=black"
-
-            # For landscape videos in portrait output: rotate 90° to fill frame
-            if not is_portrait and rotation_mode in ("auto", "landscape"):
-                scale_filter = f"transpose=1,{scale_filter}"
+            # Convert landscape video: rotate 90° CW + scale to target
+            w, h = target_resolution.split("x")
+            scale_filter = f"transpose=1,scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:0:0:black"
 
             # Check audio
             has_audio = self._video_has_audio(video_path)
@@ -739,96 +745,63 @@ class StreamEngine:
                 "-r", "30",
                 "-pix_fmt", "yuv420p",
             ]
-
             if has_audio:
                 cmd.extend(["-c:a", "aac", "-b:a", "128k"])
             else:
                 cmd.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100", "-c:a", "aac", "-b:a", "128k"])
-
             cmd.append(converted_path)
 
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
                 if result.returncode == 0 and os.path.exists(converted_path):
-                    logger.info(f"Pre-converted: {os.path.basename(video_path)} to {target_resolution}")
+                    logger.info(f"Rotated: {os.path.basename(video_path)} (landscape → portrait)")
                     converted.append(converted_path)
                     self._temp_files.append(converted_path)
                 else:
-                    logger.warning(f"Pre-convert failed for {video_path}: {result.stderr[:200]}")
+                    logger.warning(f"Rotate failed for {video_path}: {result.stderr[:150]}")
                     converted.append(video_path)
             except Exception as e:
-                logger.warning(f"Pre-convert error for {video_path}: {e}")
+                logger.warning(f"Rotate error for {video_path}: {e}")
                 converted.append(video_path)
 
         return converted
 
-    def _get_video_orientation_v2(self, video_path, rotation_mode):
-        """Determine if video is portrait (True) or landscape (False)."""
-        if rotation_mode == "portrait":
-            return True
+    def _needs_rotation(self, video_path, rotation_mode):
+        """Check if video needs rotation (landscape in portrait output)."""
+        if rotation_mode in ("portrait", "fixed"):
+            return False  # All videos assumed portrait, no rotation needed
         if rotation_mode == "landscape":
-            return False
-        if rotation_mode == "fixed":
-            return True  # Assume portrait output
+            return True   # All videos need rotation to landscape? No, we rotate landscape TO portrait
+        
+        # "auto" mode: check if video is landscape
+        try:
+            w_video, h_video = self._get_video_dimensions(video_path)
+            if w_video and h_video:
+                return w_video > h_video  # Landscape needs rotation
+        except:
+            pass
+        return False
 
-        # "auto" mode: detect via ffprobe
+    def _get_video_dimensions(self, video_path):
+        """Get video width and height."""
         try:
             cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", video_path]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
             parts = result.stdout.strip().split(",")
             if len(parts) >= 2:
-                width, height = int(parts[0]), int(parts[1])
-                return width < height
+                return int(parts[0]), int(parts[1])
         except:
             pass
-        return True
+        return None, None
 
-    def _merge_videos_for_loop(self, playlist, output_path, target_resolution, config):
-        """Merge multiple videos into one file with rotation applied. Uses concat filter."""
-        w, h = target_resolution.split("x")
-        rotation_mode = config.get("rotation_mode", "auto")
-
-        # Build FFmpeg command to merge with rotation per-video
-        inputs = []
-        input_vf_filters = []
-        input_audio_filters = []
-        n = len(playlist)
-
-        cmd = ["ffmpeg", "-y"]
-        for i, vp in enumerate(playlist):
-            cmd.extend(["-i", vp])
-
-        for i in range(n):
-            vf = self._get_video_filter_for_input(playlist[i], target_resolution, rotation_mode)
-            input_vf_filters.append(f"[{i}:v]{vf}[v{i}]")
-            input_audio_filters.append(f"[{i}:a]aresample=44100,aformat=channel_layouts=stereo[va{i}]")
-
-        concat_inputs = "".join(f"[v{i}][va{i}]" for i in range(n))
-        filter_str = ";".join(input_vf_filters + input_audio_filters)
-        filter_str += f";{concat_inputs}concat=n={n}:v=1:a=1[vout][aout]"
-
-        cmd.extend([
-            "-filter_complex", filter_str,
-            "-map", "[vout]", "-map", "[aout]",
-            "-c:v", "libx264", "-preset", "superfast", "-crf", "23",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "128k",
-            "-r", "30",
-            output_path
-        ])
-
+    def _video_has_audio(self, video_path):
+        """Check if video has an audio stream."""
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-            if result.returncode == 0 and os.path.exists(output_path):
-                logger.info(f"Merged {n} videos into loop file ({os.path.getsize(output_path) // 1024 // 1024}MB)")
-                self._temp_files.append(output_path)
-                return output_path
-            else:
-                logger.error(f"Merge failed: {result.stderr[:300]}")
-                return None
-        except Exception as e:
-            logger.error(f"Merge error: {e}")
-            return None
+            cmd = ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=codec_type", "-of", "csv=p=0", video_path]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            return "audio" in result.stdout
+        except:
+            return False
 
     def _run_loop(self):
         while not self.should_stop:
