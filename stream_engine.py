@@ -206,28 +206,34 @@ class StreamEngine:
             pass
         return "portrait"  # default to portrait
 
-    def _get_target_resolution(self, config, video_path=None):
+    def _get_target_resolution(self, config, playlist=None):
         """Get target resolution based on rotation_mode config:
-        - 'auto': detect orientation from video file
+        - 'auto': detect orientation from ALL videos, use landscape if ANY is landscape
         - 'portrait': always use portrait resolution
         - 'landscape': always use landscape resolution
         - 'fixed'/'custom': use config resolution as-is"""
         rotation_mode = config.get("rotation_mode", "fixed")
         config_res = config.get("resolution", "720x1280")
 
-        if rotation_mode == "auto" and video_path:
-            orientation = self._get_video_orientation(video_path)
-        elif rotation_mode == "portrait":
-            orientation = "portrait"
-        elif rotation_mode == "landscape":
-            orientation = "landscape"
-        else:
-            # fixed or custom: use config as-is
-            return config_res
+        if rotation_mode in ("auto", "portrait", "landscape") and playlist:
+            if rotation_mode == "portrait":
+                orientation = "portrait"
+            elif rotation_mode == "landscape":
+                orientation = "landscape"
+            else:
+                # auto: check if ANY video is landscape → use landscape for all
+                # (TikTok Live stream needs a single fixed orientation)
+                orientation = "portrait"
+                for video_path in playlist:
+                    if self._get_video_orientation(video_path) == "landscape":
+                        orientation = "landscape"
+                        break
 
-        if orientation == "portrait":
-            return "720x1280"
-        return "1280x720"
+            if orientation == "portrait":
+                return "720x1280"
+            return "1280x720"
+
+        return config_res
 
     def _ensure_audio(self, video_path, output_path):
         """Add silent audio track to a video if it has none (for concat compatibility)."""
@@ -333,7 +339,7 @@ class StreamEngine:
         # Use pre-converted H.264 files if available (avoids concat codec mismatch)
         compatible_playlist = self._write_playlist(config)
 
-        resolution = self._get_target_resolution(config, compatible_playlist[0] if compatible_playlist else playlist[0])
+        resolution = self._get_target_resolution(config, compatible_playlist)
         fps = config.get("fps", 30)
         v_bitrate = config.get("video_bitrate", "4000k")
         a_bitrate = config.get("audio_bitrate", "128k")
@@ -791,7 +797,10 @@ class StreamEngine:
                 uptime = int(time.time() - self.start_time)
 
             config = self.load_config()
-            playlist = [os.path.basename(p) for p in self.get_media_playlist()]
+            playlist_paths = self.get_media_playlist()
+            playlist = [os.path.basename(p) for p in playlist_paths]
+            # Use actual streaming resolution (respects rotation_mode)
+            actual_resolution = self._get_target_resolution(config, playlist_paths)
 
             telemetry = {
                 "status": self.status,
@@ -804,7 +813,7 @@ class StreamEngine:
                 "has_stream_key": bool(config.get("stream_key", "").strip()),
                 "playlist_count": len(playlist),
                 "playlist_files": playlist,
-                "resolution": config.get("resolution", "1080x1920"),
+                "resolution": actual_resolution,
                 "rotation_mode": config.get("rotation_mode", "fixed"),
                 "overlay_text": config.get("overlay_text", ""),
                 "live_client": live_client.get_telemetry(),
