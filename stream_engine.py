@@ -67,7 +67,6 @@ class StreamEngine:
         self.comment_processor_thread = None
         self._comment_stop_event = threading.Event()
         self._key_refresh_thread = None
-        self._next_stream_key = None  # Pre-fetched key for seamless reconnect
 
         self._last_viewer_count: int = 0
 
@@ -731,43 +730,20 @@ class StreamEngine:
         while not self.should_stop:
             config = self.load_config()
 
-            # Pre-fetch NEXT stream key while FFmpeg is still running
-            # This avoids delay during reconnect (key fetch takes ~2-3s)
+            # Fetch fresh stream key for this cycle (keys are single-use)
             tiktok_session = config.get("tiktok_session", "").strip()
             if tiktok_session and scraper and scraper.available:
-                def _prefetch_key():
-                    try:
-                        fresh = scraper.fetch_stream_key_with_session(tiktok_session)
-                        if fresh and fresh.get("rtmp_url") and fresh.get("stream_key"):
-                            self._next_stream_key = fresh
-                    except Exception:
-                        pass
-                if self._key_refresh_thread and self._key_refresh_thread.is_alive():
-                    self._key_refresh_thread.join(timeout=1)
-                self._key_refresh_thread = threading.Thread(target=_prefetch_key, daemon=True)
-                self._key_refresh_thread.start()
-
-            # Use pre-fetched key if available, otherwise fetch fresh
-            if tiktok_session and scraper and scraper.available:
-                if self._next_stream_key:
-                    config["rtmp_url"] = self._next_stream_key["rtmp_url"]
-                    config["stream_key"] = self._next_stream_key["stream_key"]
-                    with open(CONFIG_FILE, "w") as f:
-                        json.dump(config, f, indent=2)
-                    logger.info("Pre-fetched stream key applied for seamless reconnect!")
-                    self._next_stream_key = None
-                else:
-                    try:
-                        logger.info("Fetching fresh stream key from TikTok...")
-                        fresh = scraper.fetch_stream_key_with_session(tiktok_session)
-                        if fresh and fresh.get("rtmp_url") and fresh.get("stream_key"):
-                            config["rtmp_url"] = fresh["rtmp_url"]
-                            config["stream_key"] = fresh["stream_key"]
-                            with open(CONFIG_FILE, "w") as f:
-                                json.dump(config, f, indent=2)
-                            logger.info("Fresh stream key fetched and saved!")
-                    except Exception as e:
-                        logger.warning(f"Auto-fetch key failed: {e}")
+                try:
+                    logger.info("Fetching fresh stream key from TikTok...")
+                    fresh = scraper.fetch_stream_key_with_session(tiktok_session)
+                    if fresh and fresh.get("rtmp_url") and fresh.get("stream_key"):
+                        config["rtmp_url"] = fresh["rtmp_url"]
+                        config["stream_key"] = fresh["stream_key"]
+                        with open(CONFIG_FILE, "w") as f:
+                            json.dump(config, f, indent=2)
+                        logger.info("Fresh stream key fetched and saved!")
+                except Exception as e:
+                    logger.warning(f"Auto-fetch key failed: {e}")
 
             # Rebuild fresh playlist on reconnect (reuse converted/normalized files)
             self._temp_files = []
@@ -794,22 +770,6 @@ class StreamEngine:
                     text=True,
                     bufsize=1
                 )
-
-                # Start pre-fetching next stream key while FFmpeg runs
-                tiktok_session = config.get("tiktok_session", "").strip()
-                if tiktok_session and scraper and scraper.available and loop_enabled:
-                    def _prefetch_key():
-                        try:
-                            fresh = scraper.fetch_stream_key_with_session(tiktok_session)
-                            if fresh and fresh.get("rtmp_url") and fresh.get("stream_key"):
-                                self._next_stream_key = fresh
-                                logger.info("Pre-fetched next stream key (ready for seamless reconnect)")
-                        except Exception as e:
-                            logger.debug(f"Pre-fetch key failed: {e}")
-                    if self._key_refresh_thread and self._key_refresh_thread.is_alive():
-                        self._key_refresh_thread.join(timeout=1)
-                    self._key_refresh_thread = threading.Thread(target=_prefetch_key, daemon=True)
-                    self._key_refresh_thread.start()
 
                 # Read output logs line by line
                 for line in iter(self.process.stdout.readline, ''):
