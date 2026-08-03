@@ -205,6 +205,7 @@ document.addEventListener('DOMContentLoaded', () => {
             rtmp_url: document.getElementById('cfgRtmpUrl').value,
             stream_key: document.getElementById('cfgStreamKey').value,
             resolution: document.getElementById('cfgResolution').value,
+            rotation_mode: document.getElementById('cfgRotationMode').value,
             video_bitrate: document.getElementById('cfgVideoBitrate').value,
             overlay_text: document.getElementById('cfgOverlayText').value,
             loop: document.getElementById('cfgLoop').checked,
@@ -409,7 +410,7 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('barRam').style.width = `${data.system.ram_percent}%`;
 
         document.getElementById('valPlaylistCount').textContent = `${data.playlist_count} Video`;
-        document.getElementById('valResolution').textContent = `Độ phân giải: ${data.resolution}`;
+         document.getElementById('valResolution').textContent = `Độ phân giải: ${data.resolution} (${data.rotation_mode || 'fixed'})`;
 
         // Screen Overlay Simulation
         document.getElementById('screenOverlayText').textContent = data.overlay_text || 'TIKTOK LIVE AUTOMATION';
@@ -428,6 +429,7 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('cfgRtmpUrl').value = cfg.rtmp_url || '';
             document.getElementById('cfgStreamKey').value = cfg.stream_key || '';
             document.getElementById('cfgResolution').value = cfg.resolution || '1080x1920';
+            document.getElementById('cfgRotationMode').value = cfg.rotation_mode || 'fixed';
             document.getElementById('cfgVideoBitrate').value = cfg.video_bitrate || '4000k';
             document.getElementById('cfgOverlayText').value = cfg.overlay_text || '';
             document.getElementById('cfgLoop').checked = cfg.loop !== false;

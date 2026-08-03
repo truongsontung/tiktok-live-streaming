@@ -230,7 +230,7 @@ def save_config(cfg: ConfigModel):
     if os.path.exists(old_path):
         with open(old_path, "r") as f:
             old = json.load(f)
-    writable = {"resolution","video_bitrate","audio_bitrate","fps","mode",
+    writable = {"resolution","rotation_mode","video_bitrate","audio_bitrate","fps","mode",
                 "loop","auto_reconnect","overlay_text","show_clock","overlay_enabled","overlay_config","ai_enabled","ai_config"}
     for k in writable:
         v = new.get(k)

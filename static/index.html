@@ -282,6 +282,17 @@
                             </div>
 
                             <div class="form-group">
+                                <label><i class="fa-solid fa-rotate"></i> Chế độ xoay màn hình</label>
+                                <select id="cfgRotationMode" class="form-select">
+                                    <option value="fixed">Cố định (theo cấu hình trên)</option>
+                                    <option value="auto">Tự động (theo video)</option>
+                                    <option value="portrait">Dọc (720x1280)</option>
+                                    <option value="landscape">Ngang (1280x720)</option>
+                                </select>
+                                <small style="color:#888;display:block;margin-top:4px;">Tự động: dựa trên tỉ lệ video. Dọc/Ngang: cố định theo khung.</small>
+                            </div>
+
+                            <div class="form-group">
                                 <label><i class="fa-solid fa-sliders"></i> Bitrate Video (Kbps)</label>
                                 <select id="cfgVideoBitrate" class="form-select">
                                     <option value="4000k">4000 kbps (1080p Mượt)</option>

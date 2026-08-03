@@ -180,6 +180,55 @@ class StreamEngine:
         except:
             return None
 
+    def _get_video_orientation(self, video_path):
+        """Detect video orientation: 'portrait' or 'landscape' based on width/height.
+        Also checks rotation metadata (90/270 degrees = portrait)."""
+        try:
+            result = subprocess.run(
+                ["ffprobe", "-v", "quiet",
+                 "-show_entries", "stream=width,height,rotation",
+                 "-of", "csv=p=0", video_path],
+                capture_output=True, text=True, timeout=10
+            )
+            lines = result.stdout.strip().split('\n')
+            if not lines or not lines[0]:
+                return "portrait"  # default
+            parts = lines[0].split(',')
+            if len(parts) >= 2:
+                width = int(parts[0])
+                height = int(parts[1])
+                rotation = int(parts[2]) if len(parts) > 2 and parts[2] else 0
+                # Portrait if width < height, or rotation is 90/270
+                if width < height or rotation in (90, 270, -90):
+                    return "portrait"
+                return "landscape"
+        except:
+            pass
+        return "portrait"  # default to portrait
+
+    def _get_target_resolution(self, config, video_path=None):
+        """Get target resolution based on rotation_mode config:
+        - 'auto': detect orientation from video file
+        - 'portrait': always use portrait resolution
+        - 'landscape': always use landscape resolution
+        - 'fixed'/'custom': use config resolution as-is"""
+        rotation_mode = config.get("rotation_mode", "fixed")
+        config_res = config.get("resolution", "720x1280")
+
+        if rotation_mode == "auto" and video_path:
+            orientation = self._get_video_orientation(video_path)
+        elif rotation_mode == "portrait":
+            orientation = "portrait"
+        elif rotation_mode == "landscape":
+            orientation = "landscape"
+        else:
+            # fixed or custom: use config as-is
+            return config_res
+
+        if orientation == "portrait":
+            return "720x1280"
+        return "1280x720"
+
     def _ensure_audio(self, video_path, output_path):
         """Add silent audio track to a video if it has none (for concat compatibility)."""
         if os.path.exists(output_path):
@@ -281,13 +330,13 @@ class StreamEngine:
         if not playlist:
             raise ValueError("No video media available to stream!")
 
-        resolution = config.get("resolution", "1080x1920")
+        # Use pre-converted H.264 files if available (avoids concat codec mismatch)
+        compatible_playlist = self._write_playlist(config)
+
+        resolution = self._get_target_resolution(config, compatible_playlist[0] if compatible_playlist else playlist[0])
         fps = config.get("fps", 30)
         v_bitrate = config.get("video_bitrate", "4000k")
         a_bitrate = config.get("audio_bitrate", "128k")
-
-        # Use pre-converted H.264 files if available (avoids concat codec mismatch)
-        compatible_playlist = self._write_playlist(config)
 
         playlist_txt = os.path.join(LOGS_DIR, "playlist.txt")
         loop_enabled = config.get("loop", True)
@@ -756,6 +805,7 @@ class StreamEngine:
                 "playlist_count": len(playlist),
                 "playlist_files": playlist,
                 "resolution": config.get("resolution", "1080x1920"),
+                "rotation_mode": config.get("rotation_mode", "fixed"),
                 "overlay_text": config.get("overlay_text", ""),
                 "live_client": live_client.get_telemetry(),
                 "overlay_renderer": overlay_renderer.get_telemetry(),
